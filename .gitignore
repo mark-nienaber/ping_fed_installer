@@ -1,0 +1,17 @@
+# Product software + licenses (user-supplied, never commit)
+software/
+*.zip
+*.lic
+
+# Installation state + logs
+.install-state
+/tmp/.ping_install_state
+*.log
+logs/
+
+# Claude local config
+.claude/settings.local.json
+
+# Editor / OS cruft
+.DS_Store
+*.swp

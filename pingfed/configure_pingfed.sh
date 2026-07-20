@@ -1,0 +1,255 @@
+#!/bin/bash
+set -euo pipefail
+
+################################################################################
+# Script Name: configure_pingfed.sh
+# Description: Phase 2 — configure PingFederate.
+#
+#   Part A — Admin authentication via PingDirectory (LDAP):
+#     Stock PF has no headless native-admin seed, so we point PF admin console +
+#     admin API at PingDirectory. The PF admin is then the LDAP user 'pfadmin'
+#     provisioned by configure_pingdir. Fully headless — no browser wizard.
+#
+#   Part B — Configuration via /pf-admin-api/v1 (as pfadmin):
+#     - LDAP datastore -> PingDirectory
+#     - OAuth persistent-grant storage -> PingDirectory (externalized, not memory)
+#     - sample OAuth/OIDC client for PingAccess
+#
+#   Idempotent: property edits are re-applied deterministically; API objects use
+#   check-then-create (pf_ensure).
+################################################################################
+
+source ./pingconfig.env
+_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+# shellcheck disable=SC1091
+source "${_LIB_DIR}/logging.sh"
+# shellcheck disable=SC1091
+source "${_LIB_DIR}/rest_helpers.sh"
+
+PF_BIN="${PINGFED_DIR}/bin"
+LDAP_PROPS="${PF_BIN}/ldap.properties"
+RUN_PROPS="${PF_BIN}/run.properties"
+PF_PID_FILE="${PF_BIN}/pingfederate.pid"
+PF_RUN_LOG="${LOG_DIR}/pingfederate-run.log"
+# Externalized-storage wiring lives in on-disk config, not the admin API:
+#   - service-points.conf selects the active grant/session storage manager
+#   - config-store/*.xml supplies each manager's datastore id + search base
+PF_DATA_CS="${PINGFED_DIR}/server/default/data/config-store"
+PF_SERVICE_POINTS="${PINGFED_DIR}/server/default/conf/service-points.conf"
+PF_GRANT_MGR="org.sourceid.oauth20.token.AccessGrantManagerLDAPPingDirectoryImpl"
+PF_SESSION_MGR="org.sourceid.saml20.service.session.data.impl.SessionStorageManagerLdapImpl"
+
+trap 'error "configure_pingfed.sh failed at line $LINENO"' ERR
+
+# Set KEY=VALUE in a Java .properties file (replace existing or append).
+function set_prop() {
+    local f=$1 k=$2 v=$3
+    local ve; ve=$(printf '%s' "$v" | sed 's/[&|]/\\&/g')
+    if grep -qE "^${k}=" "$f"; then
+        sed -i "s|^${k}=.*|${k}=${ve}|" "$f"
+    else
+        printf '%s=%s\n' "$k" "$v" >> "$f"
+    fi
+}
+
+# Set the content of a PingFederate config-store <c:item name="NAME">…</c:item>.
+# The stock elements ship empty (e.g. <c:item name="SearchBase"></c:item>); this
+# fills or replaces the value, matching the single-line element form on disk.
+function set_config_store_item() {
+    local f=$1 name=$2 value=$3
+    local ve; ve=$(printf '%s' "$value" | sed 's/[&|]/\\&/g')
+    grep -qE "<c:item name=\"${name}\">" "$f" || { error "config-store item ${name} not found in ${f##*/}"; return 1; }
+    sed -i -E "s|(<c:item name=\"${name}\">)[^<]*(</c:item>)|\1${ve}\2|" "$f"
+}
+
+# Select an active service-point implementation in service-points.conf.
+function set_service_point() {
+    local key=$1 value=$2
+    sed -i -E "s|^${key}=.*|${key}=${value}|" "$PF_SERVICE_POINTS"
+}
+
+# -----------------------------------------------------------------------------
+# Part A — LDAP admin authentication against PingDirectory
+# -----------------------------------------------------------------------------
+function configure_ldap_admin_auth() {
+    # Skip if already switched to LDAP (idempotent restart avoidance)
+    if grep -qE '^pf\.console\.authentication=LDAP' "$RUN_PROPS" && \
+       grep -qE '^pf\.admin\.api\.authentication=LDAP' "$RUN_PROPS"; then
+        info "PF already configured for LDAP admin auth — verifying login"
+        pf_ready 6 3 && return 0
+        warning "LDAP auth set but login failed — re-applying config"
+    fi
+
+    info "Configuring PingFederate admin authentication against PingDirectory..."
+
+    # One-time backups
+    [[ -f "${LDAP_PROPS}.orig" ]] || cp "$LDAP_PROPS" "${LDAP_PROPS}.orig"
+    [[ -f "${RUN_PROPS}.orig" ]]  || cp "$RUN_PROPS"  "${RUN_PROPS}.orig"
+
+    # Obfuscate the PD search-bind password (cn=Directory Manager)
+    export JAVA_HOME="${JAVA_HOME:-}"
+    local obf
+    obf=$("${PF_BIN}/obfuscate.sh" "$PINGDIR_ROOT_PASSWORD" 2>/dev/null | grep -oE 'OBF:[^[:space:]]+' | head -1)
+    [[ -n "$obf" ]] || { error "Failed to obfuscate LDAP bind password"; return 1; }
+
+    # ldap.properties — connection + user search + direct role assignment
+    set_prop "$LDAP_PROPS" "ldap.url"       "$PINGFED_ADMIN_LDAP_URL"
+    set_prop "$LDAP_PROPS" "ldap.type"      "PingDirectory"
+    set_prop "$LDAP_PROPS" "ldap.username"  "$PINGDIR_ROOT_DN"
+    set_prop "$LDAP_PROPS" "ldap.password"  "$obf"
+    set_prop "$LDAP_PROPS" "search.base"    "$PINGDIR_PEOPLE_DN"
+    set_prop "$LDAP_PROPS" "search.filter"  "uid={0}"
+    # Direct role assignment by username (simpler + more reliable than group search)
+    set_prop "$LDAP_PROPS" "role.admin"               "$PINGFED_ADMIN_UID"
+    set_prop "$LDAP_PROPS" "role.cryptoManager"       "$PINGFED_ADMIN_UID"
+    set_prop "$LDAP_PROPS" "role.userAdmin"           "$PINGFED_ADMIN_UID"
+    set_prop "$LDAP_PROPS" "role.expressionAdmin"     "$PINGFED_ADMIN_UID"
+    set_prop "$LDAP_PROPS" "role.dataCollectionAdmin" "$PINGFED_ADMIN_UID"
+
+    # run.properties — switch console + admin API to LDAP
+    set_prop "$RUN_PROPS" "pf.console.authentication"   "LDAP"
+    set_prop "$RUN_PROPS" "pf.admin.api.authentication" "LDAP"
+
+    success "LDAP admin auth configured; restarting PingFederate to apply"
+    restart_pingfed
+    pf_ready 40 5 || { error "PF admin API not reachable as ${_PF_USER} after LDAP switch"; return 1; }
+    success "PingFederate admin login via PingDirectory works (user: ${_PF_USER})"
+    pf_accept_license
+}
+
+# Each PF admin must accept the license agreement before the API is usable.
+function pf_accept_license() {
+    local body; body=$(pf_request GET /license/agreement)
+    if echo "$body" | grep -q '"accepted":true'; then
+        info "PF license agreement already accepted"; return 0
+    fi
+    local url; url=$(echo "$body" | python3 -c "import sys,json;print(json.load(sys.stdin).get('licenseAgreementUrl',''))" 2>/dev/null)
+    pf_request PUT /license/agreement "{\"licenseAgreementUrl\":\"${url}\",\"accepted\":true}" >/dev/null
+    if [[ "$_PING_HTTP_CODE" == "200" ]]; then
+        success "PF license agreement accepted"
+    else
+        error "Failed to accept PF license agreement (HTTP $_PING_HTTP_CODE)"; return 1
+    fi
+}
+
+function restart_pingfed() {
+    info "Stopping PingFederate..."
+    if [[ -f "$PF_PID_FILE" ]]; then
+        local pid; pid=$(cat "$PF_PID_FILE" 2>/dev/null || true)
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    fi
+    pkill -f 'org.pingidentity.RunPF' 2>/dev/null || true
+    # Wait for admin port to close
+    local i=0
+    while [[ $i -lt 30 ]]; do
+        ss -ltn 2>/dev/null | grep -q ":${PINGFED_ADMIN_PORT} " || break
+        sleep 2; ((i++))
+    done
+
+    info "Starting PingFederate..."
+    mkdir -p "$LOG_DIR"
+    # Fully detach (new session) so the JVM survives this script's shell exiting.
+    ( cd "$PINGFED_DIR" && setsid bash -c 'exec ./bin/run.sh' > "$PF_RUN_LOG" 2>&1 </dev/null & )
+    # Wait for admin console port
+    i=0
+    while [[ $i -lt 40 ]]; do
+        local code
+        code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+               "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app" 2>/dev/null || echo 000)
+        [[ "$code" =~ ^(200|302|401)$ ]] && { success "PingFederate admin console back up"; return 0; }
+        sleep 5; ((i++))
+    done
+    error "PingFederate admin console did not return after restart (see $PF_RUN_LOG)"; return 1
+}
+
+# -----------------------------------------------------------------------------
+# Part B — API configuration (placeholder; implemented after Part A verified)
+# -----------------------------------------------------------------------------
+function configure_pf_api() {
+    info "PingFederate API configuration..."
+
+    # LDAP datastore -> PingDirectory (verified schema, PF 13.1)
+    local ds_payload
+    ds_payload=$(cat <<JSON
+{
+  "type": "LDAP",
+  "id": "${PINGFED_PD_DATASTORE_ID}",
+  "name": "PingDirectory",
+  "ldapType": "PING_DIRECTORY",
+  "hostnames": ["${PINGDIR_HOSTNAME}:${PINGDIR_LDAP_PORT}"],
+  "userDN": "${PINGDIR_ROOT_DN}",
+  "password": "${PINGDIR_ROOT_PASSWORD}",
+  "useSsl": false,
+  "useStartTLS": false
+}
+JSON
+)
+    pf_ensure "/dataStores/${PINGFED_PD_DATASTORE_ID}" POST "/dataStores" "$ds_payload" \
+        "LDAP datastore -> PingDirectory"
+
+    activate_externalized_storage
+}
+
+# -----------------------------------------------------------------------------
+# Externalize OAuth persistent grants + authentication sessions to PingDirectory.
+#
+# PingFederate does NOT expose this over the admin API (verified against PF 13.1
+# docs): the active storage manager is chosen in server/default/conf/
+# service-points.conf, and each LDAP manager reads its datastore id + search base
+# from a config-store XML. The PingDirectory schema, containers and ACIs are
+# already provisioned by configure_pingdir. We set both managers to their
+# PingDirectory LDAP implementation, point them at the pingdirectory-ldap
+# datastore + the grant/session containers, then restart PF to load them.
+# Idempotent: re-running detects the managers are already active and no-ops.
+# -----------------------------------------------------------------------------
+function activate_externalized_storage() {
+    if [[ "${PINGFED_SESSION_STORAGE:-memory}" != "pingdirectory" ]]; then
+        info "PINGFED_SESSION_STORAGE=${PINGFED_SESSION_STORAGE:-memory} — leaving grant/session storage in memory"
+        return 0
+    fi
+
+    local grant_xml="${PF_DATA_CS}/${PF_GRANT_MGR}.xml"
+    local sess_xml="${PF_DATA_CS}/${PF_SESSION_MGR}.xml"
+    for f in "$grant_xml" "$sess_xml" "$PF_SERVICE_POINTS"; do
+        [[ -f "$f" ]] || { error "Expected PF config file missing: $f"; return 1; }
+    done
+
+    if grep -qE "^access\.grant\.manager=${PF_GRANT_MGR//./\\.}$" "$PF_SERVICE_POINTS" && \
+       grep -qE "^session\.storage\.manager=${PF_SESSION_MGR//./\\.}$" "$PF_SERVICE_POINTS"; then
+        success "Grant + session storage already externalized to PingDirectory — skipping"
+        return 0
+    fi
+
+    info "Externalizing OAuth grants + authentication sessions to PingDirectory..."
+    # One-time backups of the stock (JDBC-default) config
+    for f in "$grant_xml" "$sess_xml" "$PF_SERVICE_POINTS"; do
+        [[ -f "${f}.orig" ]] || cp "$f" "${f}.orig"
+    done
+
+    # Point each LDAP manager at the PD datastore + its container
+    set_config_store_item "$grant_xml" PingFederateDSJNDIName "$PINGFED_PD_DATASTORE_ID"
+    set_config_store_item "$grant_xml" SearchBase             "$PINGFED_GRANTS_BASE_DN"
+    set_config_store_item "$sess_xml"  PingFederateDSJNDIName "$PINGFED_PD_DATASTORE_ID"
+    set_config_store_item "$sess_xml"  SearchBase             "$PINGFED_SESSIONS_BASE_DN"
+
+    # Activate the LDAP PingDirectory managers (replace the JDBC defaults)
+    set_service_point access.grant.manager   "$PF_GRANT_MGR"
+    set_service_point session.storage.manager "$PF_SESSION_MGR"
+
+    success "Config-store + service-points updated; restarting PingFederate to load LDAP managers"
+    restart_pingfed
+    pf_ready 40 5 || { error "PF admin API not ready after storage externalization"; return 1; }
+
+    # Confirm PF initialised the LDAP managers without error at startup
+    if grep -iE 'AccessGrantManagerLDAPPingDirectoryImpl|SessionStorageManagerLdapImpl' \
+          "${PINGFED_DIR}/log/server.log" 2>/dev/null | grep -qiE 'error|exception|fail'; then
+        warning "  Storage-manager errors present in server.log — review before relying on externalization"
+    fi
+    success "OAuth grants -> ${PINGFED_GRANTS_BASE_DN}; sessions -> ${PINGFED_SESSIONS_BASE_DN} (datastore ${PINGFED_PD_DATASTORE_ID})"
+}
+
+# -----------------------------------------------------------------------------
+section "PingFederate — Phase 2 configuration"
+configure_ldap_admin_auth
+configure_pf_api
+success "PingFederate configuration complete"

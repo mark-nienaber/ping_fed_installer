@@ -2,7 +2,7 @@
 
 An automated, phased installer that stands up a **fully integrated Ping stack** on a
 single host and configures it the way a real customer runs it — including
-**externalized session and OAuth-grant storage in PingDirectory** (not in memory).
+**externalized SSO-session and OAuth-grant storage in PingDirectory** (not in memory).
 
 Modeled structurally on the ForgeRock `ping_platform_installer` (three-phase bash
 orchestration, state tracking, idempotent Admin-API configuration).
@@ -17,9 +17,9 @@ orchestration, state tracking, idempotent Admin-API configuration).
 | 2 | **PingFederate** | 13.1.1 | Federation, OAuth 2.0 / OIDC token service |
 | 3 | **PingAccess** | 9.1.0 | Access gateway / reverse proxy (enforcement point) |
 
-Products install in dependency order: the data store first, the token service
-second (it depends on the directory), the gateway last (it depends on the token
-service).
+Single-node each (`*_COUNT=1`). Products install in dependency order: the data
+store first, the token service second (it depends on the directory), the gateway
+last (it depends on the token service).
 
 ---
 
@@ -48,17 +48,18 @@ PingDirectory** rather than holding them in memory.
                         │   IdP adapter · OAuth/OIDC clients   │  admin :9999
                         │   token provider for PingAccess      │  engine:9031
                         └──────┬──────────────────────┬────────┘
-              3. bind/search   │                      │  4. persist session + OAuth grants
-                 authenticate  │                      │     (NOT in memory)
+        3. bind as service     │                      │  4. persist session + OAuth grants
+           acct, search users  │                      │     (NOT in memory)
                                ▼                      ▼
-                        ┌─────────────────────────────────────┐
-                        │           PingDirectory              │  data + session store
-                        │  ┌───────────────────────────────┐  │  LDAPS :1636
-                        │  │ ou=people   (users)           │  │  HTTPS :1443
-                        │  │ ou=sessions (PF SSO sessions) │  │  admin :8989
-                        │  │ ou=oauth-grants (PF grants)   │  │
-                        │  └───────────────────────────────┘  │
-                        └─────────────────────────────────────┘
+                        ┌───────────────────────────────────────────┐
+                        │              PingDirectory                 │  data + session store
+                        │  ┌─────────────────────────────────────┐  │  LDAP  :1389
+                        │  │ ou=people              (users)      │  │  LDAPS :1636 (+ admin connector)
+                        │  │ ou=applications        (svc acct)   │  │  HTTPS :1443 (Admin API/SCIM)
+                        │  │ ou=AuthenticationSessions (PF SSO)  │  │
+                        │  │ ou=AccessGrant         (PF grants)  │  │
+                        │  └─────────────────────────────────────┘  │
+                        └───────────────────────────────────────────┘
 ```
 
 **Why sessions live in PingDirectory:** in-memory sessions are lost on every
@@ -67,21 +68,35 @@ to PingDirectory makes sessions durable and cluster-ready — the standard
 production customer pattern. Toggle with `PINGFED_SESSION_STORAGE` in
 `pingconfig.env` (`pingdirectory` | `memory`).
 
+**Customer-realistic details** the installer bakes in:
+- PingFederate reaches PingDirectory as a **least-privilege service account**
+  (`cn=pingfederate,ou=applications,…`), not the directory root. ACIs grant it
+  exactly what it needs: read on `ou=people`, read/write on the grant + session
+  containers.
+- The OAuth grant store is **indexed** in PingDirectory (equality on the grant
+  lookup attributes, ordering on the expiry attribute) so lookup and cleanup stay
+  index-backed as the store grows.
+- PingFederate admins authenticate against PingDirectory over LDAP (no in-product
+  native admin), so the whole stack is provisioned headlessly with no first-login
+  setup wizard.
+
 ---
 
 ## Install flow
 
 Everything is driven by `pingconfig.env` and run in three re-runnable phases.
 Phase completion is tracked in `.install-state`; re-runs skip completed phases
-unless `--force` is given.
+unless `--force` is given. All configuration is idempotent (check-then-create),
+so any phase can be safely re-run.
 
 ```
 Phase 1 — Install      unzip + license + baseline start   (PD → PF → PA)
-Phase 2 — Configure    PD schema/data/service acct +
-                       session & grant containers
-                       → PF LDAP datastore, IdP adapter,
-                         OAuth/OIDC clients, externalized sessions
-                       → PA virtual host / site / app / rules
+Phase 2 — Configure    PD schema/data/service acct + ACIs +
+                       session & grant containers + grant indexes
+                       → PF LDAP datastore (service-account bind),
+                         admin-auth-via-LDAP, IdP adapter, HTML-form PCV,
+                         OAuth/OIDC clients, externalized sessions + grants
+                       → PA virtual host / site / app / identity mapping
 Phase 3 — Integrate    wire PA → PF token provider,
                        deploy sample protected app,
                        seed test users into PingDirectory
@@ -98,7 +113,7 @@ Phase 3 — Integrate    wire PA → PF token provider,
 # 2. Review and edit configuration (hosts, ports, passwords, storage mode)
 vi pingconfig.env
 
-# 3. Prepare the host (JDK, install user, directories, /etc/hosts)   [pending]
+# 3. Prepare the host (JDK 21, install user, directories, /etc/hosts, limits)
 ./bin/ping-setup.sh
 
 # 4. Install everything
@@ -109,6 +124,19 @@ vi pingconfig.env
 ./bin/install_ping.sh --phase2 --force
 ```
 
+### Operate
+
+```bash
+./bin/ping-control.sh start all     # start|stop|restart|status  pd|pf|pa|all (dependency-ordered)
+./bin/ping-validate.sh              # 13 read-only health checks across the stack
+./bin/ping-logs.sh -f pf            # tail product logs (-f follow, -e errors)
+./bin/ping-test-sso.sh              # drive the end-to-end browser SSO flow
+```
+
+> PingFederate takes a while to start (JVM + engine warm-up). `ping-control.sh`
+> starts it detached (`setsid`) and waits on the admin port, so a slow start
+> won't leave a half-started process.
+
 ---
 
 ## Repository layout
@@ -118,15 +146,28 @@ ping_fed_installer/
 ├── pingconfig.env          # single source of truth: hosts, ports, licenses, storage mode, flags
 ├── lib/
 │   ├── logging.sh          # shared CLI output (banners, steps, summary table)
-│   └── rest_helpers.sh     # idempotent pf_* / pa_* Admin-API verbs        [pending]
+│   └── rest_helpers.sh     # idempotent pf_* / pa_* Admin-API verbs (basic auth + XSRF)
 ├── bin/
 │   ├── install_ping.sh     # phased orchestrator engine (state / preflight / rollback)
-│   ├── ping-setup.sh       # host prerequisites                            [pending]
-│   ├── ping-control.sh     # start / stop / restart / status / health      [pending]
-│   ├── ping-monitor.sh     ping-logs.sh   ping-validate.sh                 [pending]
-├── pingdir/                # setup profile · dsconfig batch · session/grant LDIF · pingdir.sh  [pending]
-├── pingfed/                # /pf-admin-api payloads · pingfed.sh                                [pending]
-├── pingaccess/             # /pa-admin-api payloads · pingaccess.sh                            [pending]
+│   ├── ping-setup.sh       # host prerequisites (JDK, user, dirs, hosts, limits)
+│   ├── ping-control.sh     # start / stop / restart / status (dependency-ordered)
+│   ├── ping-logs.sh        # tail / follow / error-filter product logs
+│   ├── ping-validate.sh    # 13 read-only stack health checks
+│   └── ping-test-sso.sh    # end-to-end SSO flow driver
+├── pingdir/
+│   ├── pingdir.sh              # Phase 1 install (extract, setup, start)
+│   ├── configure_pingdir.sh   # Phase 2: OUs, PF admin user/group, service acct, ACIs,
+│   │                          #          PF schema + session/grant containers, grant indexes
+│   └── create_test_users.sh   # seed testuser1..N
+├── pingfed/
+│   ├── pingfed.sh                 # Phase 1 install (extract, license, start)
+│   ├── configure_pingfed.sh       # Phase 2: LDAP admin auth, LDAP datastore (svc-acct bind),
+│   │                              #          externalized session/grant storage, setup-wizard bypass
+│   └── configure_pingfed_sso.sh   # Phase 2: PCV, HTML-form IdP adapter, OAuth/OIDC clients + policy
+├── pingaccess/
+│   ├── pingaccess.sh              # Phase 1 install (extract, license, start)
+│   ├── configure_pingaccess.sh    # Phase 2: SLA/password rotate, PF token provider, vhost/site/app
+│   └── sample-app.py              # stdlib backend that echoes injected identity headers
 └── software/               # product zips + licenses  (gitignored, user-supplied)
     ├── pd/   pf/   pa/
 ```
@@ -139,28 +180,44 @@ ping_fed_installer/
 |---|---|
 | `BASE_INSTALL_DIR` | where all three products install (default `/ping`) |
 | `PING_HOSTNAME` | host all services bind/advertise (single-node) |
-| `DEFAULT_PASSWORD` | shared admin password — **change before production** |
+| `DEFAULT_PASSWORD` | shared admin/service password — **change before production** |
 | `PINGFED_SESSION_STORAGE` | `pingdirectory` (externalized) or `memory` (dev) |
 | `PINGFED_SESSIONS_BASE_DN` / `PINGFED_GRANTS_BASE_DN` | where PF writes sessions / grants in PD |
+| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | least-privilege service account PF binds to PD as |
+| `PINGFED_ADMIN_UID` | LDAP user PF admins log in as (auth delegated to PD) |
 | `PINGDIR_COUNT` / `PINGFED_COUNT` / `PINGACCESS_COUNT` | instance counts (single-node now; clustering later) |
 | `INSTALL_SAMPLE_APP` / `INSTALL_TEST_USERS` / `INSTALL_OIDC_CLIENT` | optional Phase 3 content |
 
-Ports: PD LDAP 1389 / LDAPS 1636 / HTTPS 1443 / admin 8989 · PF admin 9999 /
-engine 9031 · PA admin 9000 / engine 3000 / agent 3030.
+Ports: PD LDAP 1389 / LDAPS 1636 (admin connector rides here) / HTTPS 1443
+(Admin API + SCIM) / replication 8989 (only when `PINGDIR_COUNT > 1`) · PF admin
+9999 / engine 9031 · PA admin 9000 / engine 3000 / agent 3030.
+
+> **Dev vs. prod:** for developer convenience PF binds PingDirectory over
+> plaintext LDAP (`ldap://:1389`) and `dsconfig` trusts the self-signed cert
+> (`--trustAll`). For production, switch to LDAPS (`:1636`) with a real trust
+> store.
 
 ---
 
 ## Status
 
-This is an active build. Implemented so far:
+**Functionally complete and proven end-to-end on the reference host.**
 
-- ✅ Project scaffold, `pingconfig.env`, `lib/logging.sh`
-- ✅ Orchestrator engine (`bin/install_ping.sh`) — phases, state, preflight,
-  rollback wired; **product install/configure bodies are stubs** that log intent
-  and return success so the phase machinery is testable end-to-end
-- ⏳ Product install scripts (PD / PF / PA), `rest_helpers.sh`, operator scripts
+- ✅ Project scaffold, `pingconfig.env`, `lib/logging.sh`, `lib/rest_helpers.sh`
+- ✅ Orchestrator engine (`bin/install_ping.sh`) — phases, `.install-state`,
+  preflight, rollback
+- ✅ Phase 1 install — PingDirectory, PingFederate, PingAccess extracted,
+  licensed, started
+- ✅ Phase 2 configure — PD content/schema/ACIs + grant indexes; PF LDAP admin
+  auth, service-account datastore bind, externalized sessions + grants, IdP
+  adapter, OAuth/OIDC clients; PA token provider, vhost/site/app/identity mapping
+- ✅ Phase 3 integrate — PA → PF wiring, sample protected app, test users;
+  **browser SSO proven end-to-end** with the SSO session and OAuth grant landing
+  in PingDirectory
+- ✅ Operator scripts — control / logs / validate / test-sso (`ping-validate.sh`
+  currently reports 13/13)
 
 > **License note:** the supplied PingAccess license is `Version=9.0` while the
-> software is `9.1.0`. PingAccess validates license version at startup — if 9.1
-> rejects it, obtain a 9.1 development license. All three licenses expire
-> **2026-08-18**.
+> software is `9.1.0`. PingAccess validates license version at startup; in
+> practice 9.1.0 accepted the 9.0 development license here. All three licenses
+> expire **2026-08-18**.

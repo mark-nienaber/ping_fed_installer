@@ -200,6 +200,7 @@ function configure_firewall() {
     [[ "${PINGDIR_COUNT:-1}" -gt 1 ]] && ports+=("$PINGDIR2_LDAP_PORT" "$PINGDIR2_LDAPS_PORT" "$PINGDIR2_HTTPS_PORT")
     [[ "${PINGFED_COUNT:-1}" -gt 1 ]] && ports+=("$PINGFED2_ENGINE_PORT")
     [[ "${LB_ENABLED:-false}" == "true" ]] && ports+=("$LB_HTTPS_PORT")
+    [[ -n "${DASHBOARD_PORT:-}" ]] && ports+=("$DASHBOARD_PORT")
     local p
     for p in "${ports[@]}"; do
         [[ -n "$p" ]] && sudo firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1

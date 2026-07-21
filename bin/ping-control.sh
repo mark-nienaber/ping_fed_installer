@@ -155,6 +155,18 @@ lb_start()  { info "Starting HAProxy load balancer..."; sudo systemctl start hap
 lb_stop()   { info "Stopping HAProxy..."; sudo systemctl stop haproxy 2>/dev/null && success "HAProxy stopped" || warning "HAProxy stop failed"; }
 lb_status() { if _port_listening "$LB_HTTPS_PORT"; then local a; a=$(sudo systemctl is-active haproxy 2>/dev/null); success "Load Balancer  RUNNING  (HAProxy :${LB_HTTPS_PORT}, systemd ${a})"; else warning "Load Balancer  STOPPED"; fi; }
 
+# Live monitoring dashboard (stdlib Python web server).
+_DASH_PAT='ping-dashboard\.py'
+dash_start() {
+    _port_listening "${DASHBOARD_PORT:-8600}" && { success "Dashboard already running (:${DASHBOARD_PORT:-8600})"; return 0; }
+    info "Starting monitoring dashboard (detached)..."; mkdir -p "$LOG_DIR"
+    ( setsid bash -c 'source ./pingconfig.env >/dev/null 2>&1 && exec python3 bin/ping-dashboard.py' >"${LOG_DIR}/ping-dashboard.log" 2>&1 </dev/null & )
+    local w=0; while [[ $w -lt 15 ]]; do _port_listening "${DASHBOARD_PORT:-8600}" && { success "Dashboard: http://${PING_HOSTNAME}:${DASHBOARD_PORT:-8600}/  (or http://<server-ip>:${DASHBOARD_PORT:-8600}/)"; return 0; }; sleep 1; w=$((w+1)); done
+    error "Dashboard did not start (see ${LOG_DIR}/ping-dashboard.log)"; return 1
+}
+dash_stop()   { local p; p="$(_pids_for "$_DASH_PAT")"; [[ -z "${p// }" ]] && { info "Dashboard already stopped"; return 0; }; info "Stopping dashboard (pid ${p})..."; _stop_pids "$p"; success "Dashboard stopped"; }
+dash_status() { if _port_listening "${DASHBOARD_PORT:-8600}"; then success "Monitor Dash   RUNNING  (http://${PING_HOSTNAME}:${DASHBOARD_PORT:-8600}/)"; else warning "Monitor Dash   STOPPED"; fi; }
+
 # =============================================================================
 # Dispatch
 # =============================================================================
@@ -172,8 +184,8 @@ _all_order+=(pa)
 [[ "${LB_ENABLED:-false}" == "true" ]] && _all_order+=(lb)
 
 case "$TARGET" in
-    pd|pd2|pf|pf2|pa|app|lb|all) : ;;
-    *) error "Unknown target '$TARGET' (expected: pd|pd2|pf|pf2|pa|app|lb|all)"; exit 2 ;;
+    pd|pd2|pf|pf2|pa|app|lb|dash|all) : ;;
+    *) error "Unknown target '$TARGET' (expected: pd|pd2|pf|pf2|pa|app|lb|dash|all)"; exit 2 ;;
 esac
 case "$ACTION" in start|stop|restart|status) : ;; *) error "Unknown action '$ACTION' (expected: start|stop|restart|status)"; exit 2 ;; esac
 

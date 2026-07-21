@@ -202,7 +202,10 @@ vi pingconfig.env
 ./bin/ping-control.sh restart pf2       # e.g. bounce just the PF engine node
 ./bin/ping-control.sh status all
 
-./bin/ping-monitor.sh                   # status dashboard: replication, cluster,
+./bin/ping-control.sh start dash        # live VISUAL web dashboard (auto-refresh)
+                                        #   -> http://<server>:8600/  (topology, replication,
+                                        #      cluster, PF->PD link, LB routing, per-JVM memory)
+./bin/ping-monitor.sh                   # same data, terminal: replication, cluster,
 ./bin/ping-monitor.sh --watch 5         #   PF->PD link, LB routing, per-JVM RSS
 ./bin/ping-validate.sh                  # mode-aware health checks (23/23 clustered)
 ./bin/ping-logs.sh -f pf                # tail product logs (-f follow, -e errors)
@@ -299,7 +302,8 @@ ping_fed_installer/
 │   ├── install_ping.sh     # phased orchestrator engine (state / preflight / rollback)
 │   ├── ping-setup.sh       # host prerequisites (JDK, user, dirs, hosts, limits)
 │   ├── ping-control.sh     # start/stop/restart/status the whole system (pd pd2 pf pf2 pa app lb)
-│   ├── ping-monitor.sh     # ops dashboard: replication, cluster, PF->PD link, LB, RSS (--watch)
+│   ├── ping-monitor.sh     # terminal ops dashboard: replication, cluster, PF->PD link, LB, RSS
+│   ├── ping-dashboard.py   # live VISUAL web dashboard (stdlib server; start via ping-control dash)
 │   ├── ping-logs.sh        # tail / follow / error-filter product logs
 │   ├── ping-validate.sh    # mode-aware read-only stack health checks
 │   ├── ping-test-sso.sh    # end-to-end SSO flow driver

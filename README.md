@@ -126,6 +126,14 @@ LB_ENABLED=true      # HAProxy front door, terminates TLS on :443
   serving OAuth/OIDC runtime. Because sessions and grants are externalized to the
   replicated directory, the engine is stateless — add more engines behind the LB
   to scale. Config is pushed console→engine via `/cluster/replicate`.
+- **PingFederate → PingDirectory link** — in clustered mode the datastore is
+  switched to **LDAPS** (PD's certs imported into PF's trust, `verifyHost` on) and
+  given **both** directory nodes as failover hostnames, so the PF→PD connection is
+  encrypted *and* survives a node outage (verified by stopping node 1 mid-flow —
+  SSO kept working via node 2). Built by `pingfed/secure_ha_datastore.sh`. The PD
+  self-signed certs carry the host IP (not `ping.example.com`) in their SAN, so
+  the datastore targets the IP; a production deployment would issue PD certs with
+  the service FQDN from a real CA.
 - **Load balancer** — HAProxy terminates client TLS on `:443` and routes by Host
   to the PF engine tier (`ping.example.com`) and PA (`app.example.com`),
   re-encrypting to the HTTPS backends. The OIDC issuer and app URLs are rewired to
@@ -295,7 +303,8 @@ ping_fed_installer/
 │   ├── configure_pingfed.sh       # Phase 2: LDAP admin auth, LDAP datastore (svc-acct bind),
 │   │                              #          externalized session/grant storage, setup-wizard bypass
 │   ├── configure_pingfed_sso.sh   # Phase 2: PCV, HTML-form IdP adapter, OAuth/OIDC clients + policy
-│   └── cluster_pingfed.sh         # HA: console+engine cluster (clone node 2, replicate config)
+│   ├── cluster_pingfed.sh         # HA: console+engine cluster (clone node 2, replicate config)
+│   └── secure_ha_datastore.sh     # HA: switch PF->PD datastore to LDAPS + dual-node failover
 ├── pingaccess/
 │   ├── pingaccess.sh              # Phase 1 install (extract, license, start)
 │   ├── configure_pingaccess.sh    # Phase 2: SLA/password rotate, PF token provider, vhost/site/app

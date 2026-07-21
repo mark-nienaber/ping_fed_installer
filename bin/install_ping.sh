@@ -299,6 +299,10 @@ function configure_pingfed() {
         info "PINGFED_COUNT=${PINGFED_COUNT} — building console+engine cluster (node 2 + peers)"
         bash "${SCRIPT_DIR}/pingfed/cluster_pingfed.sh" || { error "PingFederate clustering failed"; return 1; }
     fi
+    if [[ "${PINGDIR_COUNT:-1}" -gt 1 ]]; then
+        info "PINGDIR_COUNT=${PINGDIR_COUNT} — securing PF->PD datastore (LDAPS) + failover across nodes"
+        bash "${SCRIPT_DIR}/pingfed/secure_ha_datastore.sh" || { error "Datastore secure/HA reconfig failed"; return 1; }
+    fi
 }
 function rollback_pingfed() {
     warning "[STUB] Rollback PingFederate"

@@ -178,25 +178,58 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Firewall — open the stack's client-facing ports. Without this, firewalld (on by
+# default on RHEL/CentOS) blocks every product port to remote machines even
+# though the services bind 0.0.0.0, so admin consoles / the app are unreachable
+# from anywhere but the host itself. Inter-node ports (PD replication 8989/8990,
+# PF JGroups 7600-7702) stay closed — they only need localhost on this demo.
+# -----------------------------------------------------------------------------
+function configure_firewall() {
+    if ! command -v firewall-cmd >/dev/null 2>&1 || ! sudo systemctl is-active --quiet firewalld 2>/dev/null; then
+        info "firewalld not active — skipping (ensure ports are reachable by other means)"
+        return 0
+    fi
+    info "Opening stack ports in firewalld..."
+    # PD (both nodes): LDAP/LDAPS/Admin-API. PF: admin + engine (+node 2 engine).
+    # PA: admin/engine/agent. LB: 443.
+    local ports=(
+        "$PINGDIR_LDAP_PORT" "$PINGDIR_LDAPS_PORT" "$PINGDIR_HTTPS_PORT"
+        "$PINGFED_ADMIN_PORT" "$PINGFED_ENGINE_PORT"
+        "$PINGACCESS_ADMIN_PORT" "$PINGACCESS_ENGINE_PORT" "$PINGACCESS_AGENT_PORT"
+    )
+    [[ "${PINGDIR_COUNT:-1}" -gt 1 ]] && ports+=("$PINGDIR2_LDAP_PORT" "$PINGDIR2_LDAPS_PORT" "$PINGDIR2_HTTPS_PORT")
+    [[ "${PINGFED_COUNT:-1}" -gt 1 ]] && ports+=("$PINGFED2_ENGINE_PORT")
+    [[ "${LB_ENABLED:-false}" == "true" ]] && ports+=("$LB_HTTPS_PORT")
+    local p
+    for p in "${ports[@]}"; do
+        [[ -n "$p" ]] && sudo firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1
+    done
+    sudo firewall-cmd --reload >/dev/null
+    success "firewalld ports open: $(sudo firewall-cmd --list-ports)"
+}
+
+# -----------------------------------------------------------------------------
 # Driver
 # -----------------------------------------------------------------------------
 function run_all() {
     banner "Ping Installer — Host Prerequisites"
-    step_init 5
+    step_init 6
     step_begin "Create install user";        create_install_user;  step_end
     step_begin "Install OpenJDK ${JDK_VERSION}"; install_java;      step_end
     step_begin "Create directories";          create_directories;  step_end
     step_begin "Update /etc/hosts";           update_hosts;         step_end
     step_begin "Configure OS limits";         set_system_limits;    step_end
+    step_begin "Open firewall ports";         configure_firewall;   step_end
     success "Host prerequisites complete — you can now run ./bin/install_ping.sh --all"
 }
 
 case "${1:-all}" in
-    all)     run_all ;;
-    java)    install_java ;;
-    user)    create_install_user ;;
-    dirs)    create_directories ;;
-    hosts)   update_hosts ;;
-    limits)  set_system_limits ;;
-    *) echo "Usage: $0 {all|java|user|dirs|hosts|limits}"; exit 1 ;;
+    all)      run_all ;;
+    java)     install_java ;;
+    user)     create_install_user ;;
+    dirs)     create_directories ;;
+    hosts)    update_hosts ;;
+    limits)   set_system_limits ;;
+    firewall) configure_firewall ;;
+    *) echo "Usage: $0 {all|java|user|dirs|hosts|limits|firewall}"; exit 1 ;;
 esac

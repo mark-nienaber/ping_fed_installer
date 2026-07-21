@@ -213,6 +213,15 @@ The stack uses the virtual hostnames `ping.example.com` (PingFederate) and
 Every certificate is self-signed, so browsers/`curl` will warn — accept the
 exception (or use `curl -k`).
 
+**Firewall:** on RHEL/CentOS, `firewalld` is on by default and blocks every
+product port to remote machines even though the services listen on all
+interfaces — so from another host the admin consoles and app just time out.
+`./bin/ping-setup.sh` opens the stack's ports; to (re)open them on their own run:
+
+```bash
+./bin/ping-setup.sh firewall      # opens 443/9999/9000/9031-9032/3000/1389/1636/1443/…
+```
+
 ### 2. Endpoints & credentials
 
 The passwords below are the dev `DEFAULT_PASSWORD` from `pingconfig.env` —

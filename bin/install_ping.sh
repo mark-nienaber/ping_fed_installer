@@ -263,6 +263,10 @@ function configure_pingdir() {
     else
         error "PingDirectory configuration failed"; return 1
     fi
+    if [[ "${PINGDIR_COUNT:-1}" -gt 1 ]]; then
+        info "PINGDIR_COUNT=${PINGDIR_COUNT} — building replication topology (node 2 + peers)"
+        bash "${SCRIPT_DIR}/pingdir/cluster_pingdir.sh" || { error "PingDirectory clustering failed"; return 1; }
+    fi
 }
 function rollback_pingdir() {
     warning "[STUB] Rollback PingDirectory"
@@ -290,6 +294,10 @@ function configure_pingfed() {
         success "PingFederate configured"
     else
         error "PingFederate OAuth/OIDC configuration failed"; return 1
+    fi
+    if [[ "${PINGFED_COUNT:-1}" -gt 1 ]]; then
+        info "PINGFED_COUNT=${PINGFED_COUNT} — building console+engine cluster (node 2 + peers)"
+        bash "${SCRIPT_DIR}/pingfed/cluster_pingfed.sh" || { error "PingFederate clustering failed"; return 1; }
     fi
 }
 function rollback_pingfed() {
@@ -356,6 +364,18 @@ function deploy_sample_app() {
         sleep 1; ((i++))
     done
     warning "Sample app did not respond on :${port} (see ${LOG_DIR}/sample-app.log)"
+}
+# Front-door load balancer (TLS termination) + rewire of runtime URLs. Runs last
+# in Phase 3 so both the PF engine cluster and PA are already up; a no-op unless
+# LB_ENABLED=true (typically alongside clustering).
+function cluster_frontdoor() {
+    if [[ "${LB_ENABLED:-false}" != "true" ]]; then
+        info "LB_ENABLED=false — no load-balancer front door"; return 0
+    fi
+    info "Standing up load balancer (TLS termination) + rewiring runtime URLs to it"
+    bash "${SCRIPT_DIR}/bin/setup_loadbalancer.sh" || { error "Load balancer setup failed"; return 1; }
+    bash "${SCRIPT_DIR}/bin/rewire_frontdoor.sh"   || { error "Front-door rewire failed";   return 1; }
+    success "Load-balancer front door ready (https://${LB_HOSTNAME_PF} / https://${LB_HOSTNAME_APP})"
 }
 function create_test_users() {
     local count="${TEST_USER_COUNT:-0}"
@@ -424,6 +444,9 @@ function run_phase3() {
     else
         info "INSTALL_TEST_USERS=false — skipping test users"
     fi
+    if [[ "${LB_ENABLED:-false}" == "true" ]]; then
+        step_begin "Load balancer front door (TLS termination) + URL rewire"; cluster_frontdoor; step_end
+    fi
     phase_mark_done "PHASE3"
     success "Phase 3 complete"
 }
@@ -434,8 +457,15 @@ function run_phase3() {
 function show_final_status() {
     summary_init
     summary_add "PingDirectory" "LDAPS :${PINGDIR_LDAPS_PORT}" "ok"
-    summary_add "PingFederate"  "admin :${PINGFED_ADMIN_PORT} / engine :${PINGFED_ENGINE_PORT}" "ok"
+    [[ "${PINGDIR_COUNT:-1}" -gt 1 ]] && summary_add "PingDirectory-2" "LDAPS :${PINGDIR2_LDAPS_PORT} (replicated)" "ok"
+    if [[ "${PINGFED_COUNT:-1}" -gt 1 ]]; then
+        summary_add "PingFederate-1" "CLUSTERED_CONSOLE admin :${PINGFED_ADMIN_PORT}" "ok"
+        summary_add "PingFederate-2" "CLUSTERED_ENGINE engine :${PINGFED2_ENGINE_PORT}" "ok"
+    else
+        summary_add "PingFederate"  "admin :${PINGFED_ADMIN_PORT} / engine :${PINGFED_ENGINE_PORT}" "ok"
+    fi
     summary_add "PingAccess"    "admin :${PINGACCESS_ADMIN_PORT} / engine :${PINGACCESS_ENGINE_PORT}" "ok"
+    [[ "${LB_ENABLED:-false}" == "true" ]] && summary_add "Load Balancer" "HAProxy :${LB_HTTPS_PORT} (TLS termination)" "ok"
     summary_print
     summary_urls \
         "PingFederate Admin" "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app" \

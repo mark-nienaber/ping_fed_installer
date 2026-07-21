@@ -82,6 +82,63 @@ production customer pattern. Toggle with `PINGFED_SESSION_STORAGE` in
 
 ---
 
+## High-availability / clustered mode
+
+Set the instance counts above 1 and enable the load balancer, and the installer
+builds a clustered, load-balanced topology instead of single-node:
+
+```bash
+PINGDIR_COUNT=2      # 2-node PingDirectory replication
+PINGFED_COUNT=2      # PingFederate console + engine cluster
+PINGACCESS_COUNT=1
+LB_ENABLED=true      # HAProxy front door, terminates TLS on :443
+```
+
+```
+                         Browser (https, :443)
+                                │
+                    ┌───────────▼────────────┐
+                    │   HAProxy (load balancer)│  terminates client TLS on :443
+                    │   routes by Host / SNI   │  re-encrypts to HTTPS backends
+                    └─────┬─────────────┬──────┘
+       app.example.com    │             │   ping.example.com
+                          ▼             ▼
+                 ┌──────────────┐  ┌──────────────────────────┐
+                 │  PingAccess  │  │  PingFederate cluster     │
+                 │  engine :3000│  │  node1 CONSOLE  admin:9999│  (config authority)
+                 └──────┬───────┘  │  node2 ENGINE   rt  :9032 │  (OIDC runtime; issuer = LB URL)
+                        │          └───────────┬──────────────┘
+                        │  token provider       │ sessions + grants (stateless engine)
+                        │  = LB issuer          ▼
+                        │        ┌───────────────────────────────────┐
+                        └───────▶│  PingDirectory replication         │
+                                 │  node1 :1636  <== replicate ==>    │
+                                 │  node2 :2636   (users + sessions +  │
+                                 │                 grants, both nodes) │
+                                 └───────────────────────────────────┘
+```
+
+- **PingDirectory** — node 2 installs to its own dir/ports, joins node 1 via
+  `dsreplication`, and is initialized from it; writes replicate both ways. Grant
+  indexes are created on each node (index config isn't replicated).
+- **PingFederate** — node 1 becomes `CLUSTERED_CONSOLE` (admin/config authority),
+  node 2 a `CLUSTERED_ENGINE` cloned from node 1 (shared `pf.jwk` + cluster key)
+  serving OAuth/OIDC runtime. Because sessions and grants are externalized to the
+  replicated directory, the engine is stateless — add more engines behind the LB
+  to scale. Config is pushed console→engine via `/cluster/replicate`.
+- **Load balancer** — HAProxy terminates client TLS on `:443` and routes by Host
+  to the PF engine tier (`ping.example.com`) and PA (`app.example.com`),
+  re-encrypting to the HTTPS backends. The OIDC issuer and app URLs are rewired to
+  the LB (no port), so the entire SSO flow transits the front door.
+
+Built by `pingdir/cluster_pingdir.sh`, `pingfed/cluster_pingfed.sh`,
+`bin/setup_loadbalancer.sh` and `bin/rewire_frontdoor.sh` — all invoked
+automatically by the orchestrator when the counts / `LB_ENABLED` warrant. This is
+a single-host demo (co-located, port-offset); real deployments put one node per
+host on identical ports.
+
+---
+
 ## Install flow
 
 Everything is driven by `pingconfig.env` and run in three re-runnable phases.
@@ -153,17 +210,21 @@ ping_fed_installer/
 │   ├── ping-control.sh     # start / stop / restart / status (dependency-ordered)
 │   ├── ping-logs.sh        # tail / follow / error-filter product logs
 │   ├── ping-validate.sh    # 13 read-only stack health checks
-│   └── ping-test-sso.sh    # end-to-end SSO flow driver
+│   ├── ping-test-sso.sh    # end-to-end SSO flow driver
+│   ├── setup_loadbalancer.sh  # HA: HAProxy front door (TLS termination) + cert
+│   └── rewire_frontdoor.sh    # HA: point PF issuer / PA vhost at the LB URLs
 ├── pingdir/
 │   ├── pingdir.sh              # Phase 1 install (extract, setup, start)
 │   ├── configure_pingdir.sh   # Phase 2: OUs, PF admin user/group, service acct, ACIs,
 │   │                          #          PF schema + session/grant containers, grant indexes
+│   ├── cluster_pingdir.sh     # HA: install node 2 + dsreplication enable/initialize
 │   └── create_test_users.sh   # seed testuser1..N
 ├── pingfed/
 │   ├── pingfed.sh                 # Phase 1 install (extract, license, start)
 │   ├── configure_pingfed.sh       # Phase 2: LDAP admin auth, LDAP datastore (svc-acct bind),
 │   │                              #          externalized session/grant storage, setup-wizard bypass
-│   └── configure_pingfed_sso.sh   # Phase 2: PCV, HTML-form IdP adapter, OAuth/OIDC clients + policy
+│   ├── configure_pingfed_sso.sh   # Phase 2: PCV, HTML-form IdP adapter, OAuth/OIDC clients + policy
+│   └── cluster_pingfed.sh         # HA: console+engine cluster (clone node 2, replicate config)
 ├── pingaccess/
 │   ├── pingaccess.sh              # Phase 1 install (extract, license, start)
 │   ├── configure_pingaccess.sh    # Phase 2: SLA/password rotate, PF token provider, vhost/site/app
@@ -216,6 +277,11 @@ Ports: PD LDAP 1389 / LDAPS 1636 (admin connector rides here) / HTTPS 1443
   in PingDirectory
 - ✅ Operator scripts — control / logs / validate / test-sso (`ping-validate.sh`
   currently reports 13/13)
+- ✅ **Clustered / HA mode** — 2-node PingDirectory replication, PingFederate
+  console+engine cluster, and an HAProxy front door terminating TLS on :443, all
+  COUNT/`LB_ENABLED`-driven. Verified end-to-end: browser SSO through the load
+  balancer returns the injected identity header, and the engine-written auth
+  session is present on **both** replicated directory nodes
 
 > **License note:** the supplied PingAccess license is `Version=9.0` while the
 > software is `9.1.0`. PingAccess validates license version at startup; in

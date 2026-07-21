@@ -195,15 +195,24 @@ vi pingconfig.env
 ### Operate
 
 ```bash
-./bin/ping-control.sh start all     # start|stop|restart|status  pd|pf|pa|all (dependency-ordered)
-./bin/ping-validate.sh              # 13 read-only health checks across the stack
-./bin/ping-logs.sh -f pf            # tail product logs (-f follow, -e errors)
-./bin/ping-test-sso.sh              # drive the end-to-end browser SSO flow
+# Lifecycle for the WHOLE system (both PD nodes, PF console+engine, PA, sample
+# app, HAProxy) — dependency-ordered; which components are "all" follows the
+# *_COUNT / LB_ENABLED settings. Targets: pd pd2 pf pf2 pa app lb all
+./bin/ping-control.sh start all
+./bin/ping-control.sh restart pf2       # e.g. bounce just the PF engine node
+./bin/ping-control.sh status all
+
+./bin/ping-monitor.sh                   # status dashboard: replication, cluster,
+./bin/ping-monitor.sh --watch 5         #   PF->PD link, LB routing, per-JVM RSS
+./bin/ping-validate.sh                  # mode-aware health checks (23/23 clustered)
+./bin/ping-logs.sh -f pf                # tail product logs (-f follow, -e errors)
+./bin/ping-test-sso.sh                  # drive the end-to-end browser SSO flow
 ```
 
 > PingFederate takes a while to start (JVM + engine warm-up). `ping-control.sh`
-> starts it detached (`setsid`) and waits on the admin port, so a slow start
-> won't leave a half-started process.
+> starts it detached (`setsid`) and waits on the port, so a slow start won't
+> leave a half-started process. It matches each PF node by its `pf.home`, so
+> stopping the console never touches the engine (and vice-versa).
 
 ---
 
@@ -289,9 +298,10 @@ ping_fed_installer/
 ├── bin/
 │   ├── install_ping.sh     # phased orchestrator engine (state / preflight / rollback)
 │   ├── ping-setup.sh       # host prerequisites (JDK, user, dirs, hosts, limits)
-│   ├── ping-control.sh     # start / stop / restart / status (dependency-ordered)
+│   ├── ping-control.sh     # start/stop/restart/status the whole system (pd pd2 pf pf2 pa app lb)
+│   ├── ping-monitor.sh     # ops dashboard: replication, cluster, PF->PD link, LB, RSS (--watch)
 │   ├── ping-logs.sh        # tail / follow / error-filter product logs
-│   ├── ping-validate.sh    # 13 read-only stack health checks
+│   ├── ping-validate.sh    # mode-aware read-only stack health checks
 │   ├── ping-test-sso.sh    # end-to-end SSO flow driver
 │   ├── setup_loadbalancer.sh  # HA: HAProxy front door (TLS termination) + cert
 │   └── rewire_frontdoor.sh    # HA: point PF issuer / PA vhost at the LB URLs

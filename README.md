@@ -196,6 +196,68 @@ vi pingconfig.env
 
 ---
 
+## Accessing & testing the stack
+
+### 1. Make the hostnames resolve
+
+The stack uses the virtual hostnames `ping.example.com` (PingFederate) and
+`app.example.com` (the protected app). On the install host they already map to
+`127.0.0.1`. To reach it from a browser on **another machine**, add both names to
+*that machine's* hosts file, pointing at the server's IP:
+
+```
+# /etc/hosts (Linux/macOS)  or  C:\Windows\System32\drivers\etc\hosts
+192.168.58.111  ping.example.com app.example.com
+```
+
+Every certificate is self-signed, so browsers/`curl` will warn — accept the
+exception (or use `curl -k`).
+
+### 2. Endpoints & credentials
+
+The passwords below are the dev `DEFAULT_PASSWORD` from `pingconfig.env` —
+**change them before production.**
+
+| What | URL | Username | Password |
+|---|---|---|---|
+| **Protected app** — start here | clustered+LB: `https://app.example.com/`<br>single-node: `https://app.example.com:3000/` | *(end-user, below)* | |
+| End-user login (HTML form) | *(you're redirected to PingFederate)* | `testuser1` … `testuser5` | `2FederateM0re!` |
+| PingFederate admin console | `https://ping.example.com:9999/pingfederate/app` | `pfadmin` | `2FederateM0re!` |
+| PingAccess admin console | `https://ping.example.com:9000/` | `administrator` | `2FederateM0re!` |
+| PingDirectory (LDAP) | `ldap://ping.example.com:1389` (node&nbsp;1) · `:2389` (node&nbsp;2) | `cn=Directory Manager` | `2FederateM0re!` |
+| OIDC discovery | clustered+LB: `https://ping.example.com/.well-known/openid-configuration`<br>single-node: `https://ping.example.com:9031/.well-known/openid-configuration` | — | — |
+
+> PingFederate admins sign in as an **LDAP user in PingDirectory** — `pfadmin` is
+> provisioned there by the installer, not a native PingFederate account. There is
+> deliberately no first-login setup wizard.
+
+### 3. Test the protected app (the main flow)
+
+1. Browse to **`https://app.example.com/`** (clustered+LB) or
+   **`https://app.example.com:3000/`** (single-node).
+2. PingAccess sees no session and redirects you to the PingFederate login form.
+3. Sign in as **`testuser1` / `2FederateM0re!`**.
+4. You land back on the app, which prints the injected identity header
+   **`X-USER: testuser1`** — proof the full chain worked: PingAccess → PingFederate
+   → PingDirectory, with the SSO session persisted to the directory (and, in
+   clustered mode, everything transiting the load balancer on `:443`).
+
+### 4. Quick checks from the command line
+
+```bash
+# OIDC discovery — issuer is the LB URL (no port) in clustered mode
+curl -sk https://ping.example.com/.well-known/openid-configuration \
+  | python3 -m json.tool | grep -E 'issuer|authorization_endpoint'
+
+# Unauthenticated app request -> 302 to PingFederate (proves PA->PF wiring)
+curl -sk -D - -o /dev/null https://app.example.com/ | grep -i '^location'
+
+# Whole-stack health: 13 read-only checks
+./bin/ping-validate.sh
+```
+
+---
+
 ## Repository layout
 
 ```

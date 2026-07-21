@@ -161,11 +161,11 @@ dash_start() {
     _port_listening "${DASHBOARD_PORT:-8600}" && { success "Dashboard already running (:${DASHBOARD_PORT:-8600})"; return 0; }
     info "Starting monitoring dashboard (detached)..."; mkdir -p "$LOG_DIR"
     ( setsid bash -c 'source ./pingconfig.env >/dev/null 2>&1 && exec python3 bin/ping-dashboard.py' >"${LOG_DIR}/ping-dashboard.log" 2>&1 </dev/null & )
-    local w=0; while [[ $w -lt 15 ]]; do _port_listening "${DASHBOARD_PORT:-8600}" && { success "Dashboard: http://${PING_HOSTNAME}:${DASHBOARD_PORT:-8600}/  (or http://<server-ip>:${DASHBOARD_PORT:-8600}/)"; return 0; }; sleep 1; w=$((w+1)); done
+    local w=0; while [[ $w -lt 15 ]]; do _port_listening "${DASHBOARD_PORT:-8600}" && { success "Dashboard: https://${PING_HOSTNAME}:${DASHBOARD_PORT:-8600}/  (self-signed — accept the cert warning)"; return 0; }; sleep 1; w=$((w+1)); done
     error "Dashboard did not start (see ${LOG_DIR}/ping-dashboard.log)"; return 1
 }
 dash_stop()   { local p; p="$(_pids_for "$_DASH_PAT")"; [[ -z "${p// }" ]] && { info "Dashboard already stopped"; return 0; }; info "Stopping dashboard (pid ${p})..."; _stop_pids "$p"; success "Dashboard stopped"; }
-dash_status() { if _port_listening "${DASHBOARD_PORT:-8600}"; then success "Monitor Dash   RUNNING  (http://${PING_HOSTNAME}:${DASHBOARD_PORT:-8600}/)"; else warning "Monitor Dash   STOPPED"; fi; }
+dash_status() { if _port_listening "${DASHBOARD_PORT:-8600}"; then success "Monitor Dash   RUNNING  (https://${PING_HOSTNAME}:${DASHBOARD_PORT:-8600}/)"; else warning "Monitor Dash   STOPPED"; fi; }
 
 # =============================================================================
 # Dispatch

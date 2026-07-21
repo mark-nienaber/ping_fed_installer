@@ -13,7 +13,7 @@
 #   `bin/ping-control.sh start dash` or directly:
 #       bash -c 'source ./pingconfig.env && python3 bin/ping-dashboard.py'
 # =============================================================================
-import base64, json, os, re, socket, ssl, subprocess, threading, time, urllib.request
+import base64, json, os, re, shutil, socket, ssl, subprocess, tempfile, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,7 +66,32 @@ APP_PORT = int((g("SAMPLE_APP_TARGET", "http://localhost:8090").rsplit(":", 1)[-
 RT_URL = LB_PF_URL if LB_ON else g("PINGFED_BASE_URL", "https://%s:%d" % (PF_HOST, PF_ENGINE_PORT))
 APP_URL = LB_APP_URL if LB_ON else "https://%s:%d" % (g("SAMPLE_APP_VIRTUAL_HOST", "app.example.com"), PA_ENGINE_PORT)
 DASH_PORT = gi("DASHBOARD_PORT", 8600)
+DASH_CERT = g("DASHBOARD_CERT") or "%s/dashboard/dashboard.pem" % g("BASE_INSTALL_DIR", "/ping")
 PFADMIN = "https://%s:%d/pf-admin-api/v1" % (PF_HOST, PF_ADMIN_PORT)
+
+def host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]; s.close(); return ip
+    except Exception: return "127.0.0.1"
+
+def ensure_cert():
+    """Self-signed cert for the dashboard (SAN covers ping.<domain> + host IP).
+    The stack is HTTPS end-to-end, so browsers force TLS on this port too."""
+    if os.path.exists(DASH_CERT): return DASH_CERT
+    try:
+        os.makedirs(os.path.dirname(DASH_CERT), exist_ok=True)
+        td = tempfile.mkdtemp(); key = os.path.join(td, "k"); crt = os.path.join(td, "c")
+        san = "subjectAltName=DNS:%s,DNS:localhost,IP:%s,IP:127.0.0.1" % (PF_HOST, host_ip())
+        subprocess.check_call(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key,
+             "-out", crt, "-days", "825", "-subj", "/CN=%s" % PF_HOST, "-addext", san],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        with open(DASH_CERT, "w") as o: o.write(open(crt).read()); o.write(open(key).read())
+        os.chmod(DASH_CERT, 0o600); shutil.rmtree(td, ignore_errors=True)
+        return DASH_CERT
+    except Exception:
+        return None
 
 CTX = ssl.create_default_context(); CTX.check_hostname = False; CTX.verify_mode = ssl.CERT_NONE
 
@@ -435,6 +460,14 @@ tick(); setInterval(tick, REFRESH);
 if __name__ == "__main__":
     threading.Thread(target=collector_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", DASH_PORT), H)
-    print("Ping dashboard on http://0.0.0.0:%d  (mode PDx%d PFx%d LB=%s)" % (DASH_PORT, PD_COUNT, PF_COUNT, LB_ON))
+    scheme = "http"
+    pem = ensure_cert()
+    if pem:
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(pem)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True); scheme = "https"
+        except Exception as ex:
+            print("TLS setup failed (%s) — serving plaintext HTTP" % ex)
+    print("Ping dashboard on %s://0.0.0.0:%d  (mode PDx%d PFx%d LB=%s)" % (scheme, DASH_PORT, PD_COUNT, PF_COUNT, LB_ON))
     try: srv.serve_forever()
     except KeyboardInterrupt: pass

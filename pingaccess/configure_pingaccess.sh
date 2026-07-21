@@ -63,13 +63,14 @@ function accept_sla_and_rotate() {
         info "SLA + password already handled — skipping"; return 0
     fi
 
-    # 1. Accept SLA (and clear firstLogin) via PUT /users/1
+    # 1. Accept SLA (and clear firstLogin + the tutorial overlay) via PUT /users/1
     info "Accepting PingAccess license agreement (SLA)..."
     local user_json
     user_json=$(pa_request GET /users/1)
-    # set slaAccepted=true, firstLogin=false (leave other fields intact)
+    # slaAccepted=true, firstLogin=false, showTutorial=false so the first console
+    # login lands directly on a usable dashboard, not the SLA/tutorial wizard.
     local patched
-    patched=$(echo "$user_json" | python3 -c "import sys,json;u=json.load(sys.stdin);u['slaAccepted']=True;u['firstLogin']=False;print(json.dumps(u))")
+    patched=$(echo "$user_json" | python3 -c "import sys,json;u=json.load(sys.stdin);u['slaAccepted']=True;u['firstLogin']=False;u['showTutorial']=False;print(json.dumps(u))")
     pa_request PUT /users/1 "$patched" >/dev/null 2>&1
     [[ "$_PING_HTTP_CODE" == "200" ]] && success "SLA accepted" || warning "SLA update returned HTTP $_PING_HTTP_CODE"
 

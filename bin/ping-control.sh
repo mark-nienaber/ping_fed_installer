@@ -43,9 +43,16 @@ _http_code() {
     curl -sk -o /dev/null -w "%{http_code}" --max-time 5 "$1" 2>/dev/null || echo "000"
 }
 
-# PIDs of the running JVM(s) for a product, matched by its unique install dir.
+# Precise JVM main-class signatures per product. Matching these (rather than the
+# install path) avoids ever matching the invoking shell — a shell whose command
+# line merely contains the install path would otherwise be caught and killed.
+_PD_PAT='com\.unboundid\.directory\.server\.core\.DirectoryServer'
+_PF_PAT='org\.pingidentity\.RunPF'
+_PA_PAT='com\.pingidentity\.pa\.cli\.Starter'
+
+# PIDs of the running JVM(s) matching a signature; never returns our own PID.
 _pids_for() {
-    pgrep -f "$1" 2>/dev/null | tr '\n' ' '
+    pgrep -f "$1" 2>/dev/null | grep -vw "$$" | tr '\n' ' '
 }
 
 # Launch a foreground run.sh fully detached from this shell so it survives the
@@ -111,17 +118,17 @@ pd_start() {
 }
 
 pd_stop() {
-    if ! _port_listening "$PINGDIR_LDAPS_PORT" && [[ -z "$(_pids_for "$PINGDIR_DIR")" ]]; then
+    if ! _port_listening "$PINGDIR_LDAPS_PORT" && [[ -z "$(_pids_for "$_PD_PAT")" ]]; then
         info "PingDirectory already stopped"; return 0
     fi
     info "Stopping PingDirectory..."
-    "${PINGDIR_DIR}/bin/stop-server" >/dev/null 2>&1 || _stop_pids "$(_pids_for "$PINGDIR_DIR")"
+    "${PINGDIR_DIR}/bin/stop-server" >/dev/null 2>&1 || _stop_pids "$(_pids_for "$_PD_PAT")"
     success "PingDirectory stopped"
 }
 
 pd_status() {
     if _port_listening "$PINGDIR_LDAPS_PORT"; then
-        success "PingDirectory  RUNNING   (LDAP ${PINGDIR_LDAP_PORT}, LDAPS ${PINGDIR_LDAPS_PORT}, pid $(_pids_for "$PINGDIR_DIR"))"
+        success "PingDirectory  RUNNING   (LDAP ${PINGDIR_LDAP_PORT}, LDAPS ${PINGDIR_LDAPS_PORT}, pid $(_pids_for "$_PD_PAT"))"
     else
         warning "PingDirectory  STOPPED"
     fi
@@ -142,7 +149,7 @@ pf_start() {
 }
 
 pf_stop() {
-    local pids; pids="$(_pids_for "$PINGFED_DIR")"
+    local pids; pids="$(_pids_for "$_PF_PAT")"
     if [[ -z "${pids// }" ]]; then info "PingFederate already stopped"; return 0; fi
     info "Stopping PingFederate (pid ${pids})..."
     _stop_pids "$pids"
@@ -152,7 +159,7 @@ pf_stop() {
 pf_status() {
     if _port_listening "$PINGFED_ADMIN_PORT"; then
         local code; code=$(_http_code "https://${PINGFED_HOSTNAME}:${PINGFED_ENGINE_PORT}/pf/heartbeat.ping")
-        success "PingFederate   RUNNING   (admin ${PINGFED_ADMIN_PORT}, engine ${PINGFED_ENGINE_PORT} heartbeat HTTP ${code}, pid $(_pids_for "$PINGFED_DIR"))"
+        success "PingFederate   RUNNING   (admin ${PINGFED_ADMIN_PORT}, engine ${PINGFED_ENGINE_PORT} heartbeat HTTP ${code}, pid $(_pids_for "$_PF_PAT"))"
     else
         warning "PingFederate   STOPPED"
     fi
@@ -173,7 +180,7 @@ pa_start() {
 }
 
 pa_stop() {
-    local pids; pids="$(_pids_for "$PINGACCESS_DIR")"
+    local pids; pids="$(_pids_for "$_PA_PAT")"
     if [[ -z "${pids// }" ]]; then info "PingAccess already stopped"; return 0; fi
     info "Stopping PingAccess (pid ${pids})..."
     _stop_pids "$pids"
@@ -183,7 +190,7 @@ pa_stop() {
 pa_status() {
     if _port_listening "$PINGACCESS_ADMIN_PORT"; then
         local code; code=$(_http_code "https://${PINGACCESS_HOSTNAME}:${PINGACCESS_ENGINE_PORT}/")
-        success "PingAccess     RUNNING   (admin ${PINGACCESS_ADMIN_PORT}, engine ${PINGACCESS_ENGINE_PORT} HTTP ${code}, pid $(_pids_for "$PINGACCESS_DIR"))"
+        success "PingAccess     RUNNING   (admin ${PINGACCESS_ADMIN_PORT}, engine ${PINGACCESS_ENGINE_PORT} HTTP ${code}, pid $(_pids_for "$_PA_PAT"))"
     else
         warning "PingAccess     STOPPED"
     fi

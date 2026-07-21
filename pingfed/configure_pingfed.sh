@@ -35,6 +35,10 @@ PF_RUN_LOG="${LOG_DIR}/pingfederate-run.log"
 #   - service-points.conf selects the active grant/session storage manager
 #   - config-store/*.xml supplies each manager's datastore id + search base
 PF_DATA_CS="${PINGFED_DIR}/server/default/data/config-store"
+# Config-store file backing com.pingidentity.page.Login: holds the license-map
+# whose items gate the admin console's first-run experience (license agreement +
+# the Connect-to-PingOne Initial Setup Wizard).
+PF_LOGIN_CS="${PF_DATA_CS}/com.pingidentity.page.Login.xml"
 PF_SERVICE_POINTS="${PINGFED_DIR}/server/default/conf/service-points.conf"
 PF_GRANT_MGR="org.sourceid.oauth20.token.AccessGrantManagerLDAPPingDirectoryImpl"
 PF_SESSION_MGR="org.sourceid.saml20.service.session.data.impl.SessionStorageManagerLdapImpl"
@@ -163,6 +167,61 @@ function restart_pingfed() {
 }
 
 # -----------------------------------------------------------------------------
+# Suppress PingFederate's first-run "Connect to PingOne" Initial Setup Wizard.
+#
+# On a fresh install the admin console forces this wizard until setup is marked
+# complete — LDAP admin auth does NOT bypass it. There is no admin-API endpoint
+# for this; the console's own setInitialSetupDone() writes a single config-store
+# value: item "initial-setup-done"=true INSIDE the "license-map" map of the
+# com.pingidentity.page.Login store (verified by disassembling
+# InitialSetupConfigStore in pf-protocolengine.jar). We write the same value so
+# a restarted console treats setup as done and goes straight to Sign On.
+# Idempotent: a no-op once the item is present. Caller restarts PF to load it.
+# -----------------------------------------------------------------------------
+function complete_initial_setup() {
+    local f="$PF_LOGIN_CS"
+    if [[ -f "$f" ]] && grep -q 'name="initial-setup-done"' "$f"; then
+        info "PF Initial Setup Wizard already marked complete — skipping"
+        return 0
+    fi
+    info "Suppressing PingFederate Connect-to-PingOne Initial Setup Wizard..."
+
+    if [[ ! -f "$f" ]]; then
+        # pf_accept_license normally creates this file; recreate it if absent.
+        cat > "$f" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<con:config xmlns:con="http://www.sourceid.org/2004/05/config">
+    <con:map name="license-map">
+        <con:item name="initial-setup-done">true</con:item>
+    </con:map>
+</con:config>
+XML
+    else
+        [[ -f "${f}.orig" ]] || cp "$f" "${f}.orig"
+        # Match the namespace prefix PF actually wrote (con: or c:) so the added
+        # element stays in a declared namespace.
+        local pfx; pfx=$(grep -oE '</[A-Za-z0-9]+:map>' "$f" | head -1 | sed -E 's#</([A-Za-z0-9]+):map>#\1#')
+        pfx="${pfx:-con}"
+        local item="        <${pfx}:item name=\"initial-setup-done\">true</${pfx}:item>"
+        if grep -qE "<${pfx}:map name=\"license-map\">" "$f"; then
+            # Insert the item just before the license-map's closing tag.
+            awk -v line="$item" -v endtag="</${pfx}:map>" \
+                'index($0,endtag) && !d { print line; d=1 } { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+        else
+            # No license-map yet: add the whole map before the config close.
+            awk -v item="$item" -v pfx="$pfx" -v endtag="</${pfx}:config>" \
+                'index($0,endtag) && !d { printf "    <%s:map name=\"license-map\">\n%s\n    </%s:map>\n", pfx, item, pfx; d=1 } { print }' \
+                "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+        fi
+    fi
+
+    success "initial-setup-done=true written to ${f##*/}; restarting PF to apply"
+    restart_pingfed
+    pf_ready 40 5 || { error "PF admin API not ready after setup-wizard suppression"; return 1; }
+    success "Initial Setup Wizard suppressed — console lands on Sign On"
+}
+
+# -----------------------------------------------------------------------------
 # Part B — API configuration (placeholder; implemented after Part A verified)
 # -----------------------------------------------------------------------------
 function configure_pf_api() {
@@ -188,6 +247,7 @@ JSON
         "LDAP datastore -> PingDirectory"
 
     activate_externalized_storage
+    complete_initial_setup
 }
 
 # -----------------------------------------------------------------------------

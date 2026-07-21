@@ -226,8 +226,26 @@ XML
 # -----------------------------------------------------------------------------
 function configure_pf_api() {
     info "PingFederate API configuration..."
+    ensure_pd_datastore
+    activate_externalized_storage
+    complete_initial_setup
+}
 
-    # LDAP datastore -> PingDirectory (verified schema, PF 13.1)
+# -----------------------------------------------------------------------------
+# LDAP datastore -> PingDirectory.
+#
+# Binds as the cn=pingfederate service account (LDAP_BIND_DN), NOT the PD root
+# (cn=Directory Manager) — customer-realistic least privilege. configure_pingdir
+# provisions this account and grants it exactly what PF needs via ACIs: read on
+# ou=people (user authentication + attribute lookup) and read/write on the
+# ou=AccessGrant + ou=AuthenticationSessions containers (externalized storage).
+#
+# Idempotent: creates the datastore if absent; if an earlier run created it under
+# a different bind DN (e.g. the PD root), reconciles it to the service account by
+# merging the new bind into the datastore's current representation and PUTting it
+# back (preserving every other field PF set).
+# -----------------------------------------------------------------------------
+function ensure_pd_datastore() {
     local ds_payload
     ds_payload=$(cat <<JSON
 {
@@ -236,18 +254,46 @@ function configure_pf_api() {
   "name": "PingDirectory",
   "ldapType": "PING_DIRECTORY",
   "hostnames": ["${PINGDIR_HOSTNAME}:${PINGDIR_LDAP_PORT}"],
-  "userDN": "${PINGDIR_ROOT_DN}",
-  "password": "${PINGDIR_ROOT_PASSWORD}",
+  "userDN": "${LDAP_BIND_DN}",
+  "password": "${LDAP_BIND_PASSWORD}",
   "useSsl": false,
   "useStartTLS": false
 }
 JSON
 )
-    pf_ensure "/dataStores/${PINGFED_PD_DATASTORE_ID}" POST "/dataStores" "$ds_payload" \
-        "LDAP datastore -> PingDirectory"
+    local body; body=$(pf_request GET "/dataStores/${PINGFED_PD_DATASTORE_ID}")
+    if [[ "$_PING_HTTP_CODE" != "200" ]]; then
+        pf_ensure "/dataStores/${PINGFED_PD_DATASTORE_ID}" POST "/dataStores" "$ds_payload" \
+            "LDAP datastore -> PingDirectory (bind ${LDAP_BIND_DN})"
+        return $?
+    fi
 
-    activate_externalized_storage
-    complete_initial_setup
+    # Datastore exists — reconcile its bind DN to the service account.
+    local cur_dn
+    cur_dn=$(echo "$body" | python3 -c "import sys,json;print(json.load(sys.stdin).get('userDN',''))" 2>/dev/null || true)
+    if [[ "$cur_dn" == "$LDAP_BIND_DN" ]]; then
+        info "  LDAP datastore already binds as ${LDAP_BIND_DN} — skipping"
+        return 0
+    fi
+    info "  Reconciling LDAP datastore bind '${cur_dn:-<unknown>}' -> '${LDAP_BIND_DN}'"
+
+    # Merge the new bind into the datastore's current representation so no other
+    # PF-managed field is lost on the round-trip (GET never returns the password).
+    local merged tmp; tmp=$(mktemp)
+    merged=$(echo "$body" | NEW_DN="$LDAP_BIND_DN" NEW_PW="$LDAP_BIND_PASSWORD" python3 -c "
+import sys, json, os
+d = json.load(sys.stdin)
+d['userDN'] = os.environ['NEW_DN']
+d['password'] = os.environ['NEW_PW']
+json.dump(d, sys.stdout)
+" 2>/dev/null)
+    [[ -n "$merged" ]] || { error "  Failed to build datastore update payload"; rm -f "$tmp"; return 1; }
+
+    pf_request PUT "/dataStores/${PINGFED_PD_DATASTORE_ID}" "$merged" > "$tmp" 2>/dev/null
+    if [[ "$_PING_HTTP_CODE" =~ ^20 ]]; then
+        success "  LDAP datastore bind updated to service account (HTTP $_PING_HTTP_CODE)"; rm -f "$tmp"; return 0
+    fi
+    error "  LDAP datastore bind update failed (HTTP $_PING_HTTP_CODE): $(head -c 300 "$tmp")"; rm -f "$tmp"; return 1
 }
 
 # -----------------------------------------------------------------------------

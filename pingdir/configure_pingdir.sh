@@ -27,7 +27,12 @@ _LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 source "${_LIB_DIR}/logging.sh"
 
 LDAPMODIFY="${PINGDIR_DIR}/bin/ldapmodify"
+DSCONFIG="${PINGDIR_DIR}/bin/dsconfig"
+REBUILD_INDEX="${PINGDIR_DIR}/bin/rebuild-index"
 PF_CONF="${PINGFED_DIR}/server/default/conf"
+# Local DB backend holding the base DN (verified from config.ldif: ds-cfg-base-dn
+# dc=example,dc=com lives in backend-id=userRoot).
+PINGDIR_USERROOT_BACKEND="userRoot"
 _PW_FILE=""
 
 trap '[[ -n "$_PW_FILE" ]] && rm -f "$_PW_FILE"; error "configure_pingdir.sh failed at line $LINENO"' ERR
@@ -178,10 +183,94 @@ LDIF
 }
 
 # -----------------------------------------------------------------------------
+# 4. Indexes — grant attributes PingFederate queries at runtime.
+#
+# The AccessGrantManager looks grants up by guid, hashed refresh token, unique
+# user id and client id, and prunes expired grants by grant type + expiry.
+# PingFederate's tuning guidance recommends equality indexes on those attributes
+# (ordering on accessGrantExpires) so grant lookup and cleanup stay index-backed
+# as the store grows instead of degrading to unindexed subtree scans. Sessions
+# are keyed by their group-id RDN, so DN lookups need no secondary index.
+# Ref: docs.pingidentity.com/pingfederate/13.1 administrators_reference_guide —
+# "Indexing grant attributes in PingDirectory".
+#
+# dsconfig/rebuild-index run online over the LDAPS administration connector
+# (which rides on PINGDIR_LDAPS_PORT); --trustAll accepts the dev self-signed
+# cert (mirrors the plaintext-LDAP dev posture elsewhere — use a real trust
+# store in prod). Idempotent via list-local-db-indexes.
+# -----------------------------------------------------------------------------
+function create_grant_indexes() {
+    if [[ "${PINGFED_SESSION_STORAGE:-memory}" != "pingdirectory" ]]; then
+        info "PINGFED_SESSION_STORAGE=${PINGFED_SESSION_STORAGE:-memory} — grants not externalized, skipping indexes"
+        return 0
+    fi
+    info "Creating PingDirectory indexes for externalized OAuth grant attributes..."
+
+    # attribute:index-type — PF 13.1 recommended set
+    local specs=(
+        "accessGrantGuid:equality"
+        "accessGrantUniqueUserIdentifier:equality"
+        "accessGrantHashedRefreshTokenValue:equality"
+        "accessGrantClientId:equality"
+        "accessGrantGrantType:equality"
+        "accessGrantExpires:ordering"
+    )
+
+    local existing
+    existing=$("$DSCONFIG" --no-prompt \
+        --hostname localhost --port "$PINGDIR_LDAPS_PORT" --useSSL --trustAll \
+        --bindDN "$PINGDIR_ROOT_DN" --bindPasswordFile "$_PW_FILE" \
+        list-local-db-indexes --backend-name "$PINGDIR_USERROOT_BACKEND" 2>/dev/null || true)
+
+    local created=0 spec attr itype
+    for spec in "${specs[@]}"; do
+        attr="${spec%%:*}"; itype="${spec##*:}"
+        if grep -qiw -- "$attr" <<<"$existing"; then
+            info "  index ${attr} already present — skipping"
+            continue
+        fi
+        "$DSCONFIG" --no-prompt \
+            --hostname localhost --port "$PINGDIR_LDAPS_PORT" --useSSL --trustAll \
+            --bindDN "$PINGDIR_ROOT_DN" --bindPasswordFile "$_PW_FILE" \
+            create-local-db-index --backend-name "$PINGDIR_USERROOT_BACKEND" \
+            --index-name "$attr" --set "index-type:${itype}" >/dev/null
+        success "  index created: ${attr} (${itype})"
+        ((created++)) || true
+    done
+
+    if [[ $created -eq 0 ]]; then
+        success "All grant indexes already present"
+        return 0
+    fi
+
+    # At first configuration the grant container is empty, so a freshly created
+    # index is trusted immediately; rebuild-index is the documented finishing
+    # step and also covers re-runs against a populated store. Best-effort: a
+    # rebuild hiccup must not fail Phase 2 — the indexes are already defined.
+    # Run as an in-server task (--task); rebuild-index has no --no-prompt flag and
+    # takes no confirmation when driven by connection options.
+    info "Rebuilding ${created} new grant index(es) under ${PINGDIR_BASE_DN}..."
+    if "$REBUILD_INDEX" \
+        --hostname localhost --port "$PINGDIR_LDAPS_PORT" --useSSL --trustAll \
+        --bindDN "$PINGDIR_ROOT_DN" --bindPasswordFile "$_PW_FILE" \
+        --baseDN "$PINGDIR_BASE_DN" \
+        --index accessGrantGuid --index accessGrantUniqueUserIdentifier \
+        --index accessGrantHashedRefreshTokenValue --index accessGrantClientId \
+        --index accessGrantGrantType --index accessGrantExpires \
+        --task >/dev/null 2>&1; then
+        success "Grant indexes rebuilt"
+    else
+        warning "rebuild-index did not complete cleanly — indexes are defined and will build on next write/rebuild"
+    fi
+    success "Grant attribute indexes configured"
+}
+
+# -----------------------------------------------------------------------------
 section "PingDirectory — Phase 2 configuration"
 _pw_file
 create_content
 load_pf_schema
 apply_acis
+create_grant_indexes
 rm -f "$_PW_FILE"; _PW_FILE=""
 success "PingDirectory configuration complete"

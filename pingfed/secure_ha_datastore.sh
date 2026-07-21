@@ -31,8 +31,44 @@ source "${_LIB_DIR}/rest_helpers.sh"
 LDAPS_HOST="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
 LDAPS_HOST="${LDAPS_HOST:-127.0.0.1}"
 DS_ID="${PINGFED_PD_DATASTORE_ID}"
+PF1_DIR="${PINGFED_DIR}"
+LDAP_PROPS="${PF1_DIR}/bin/ldap.properties"
+PF1_PID="${PF1_DIR}/bin/pingfederate.pid"
+PF_RUN_LOG="${LOG_DIR}/pingfederate-run.log"
 
 trap 'error "secure_ha_datastore.sh failed at line $LINENO"' ERR
+
+function set_prop() {  # file key value  (| delimiter; escapes & and |)
+    local f=$1 k=$2 v=$3 ve; ve=$(printf '%s' "$v" | sed 's/[&|]/\\&/g')
+    if grep -qE "^${k}=" "$f"; then sed -i "s|^${k}=.*|${k}=${ve}|" "$f"
+    else printf '%s=%s\n' "$k" "$v" >> "$f"; fi
+}
+
+# Targeted console restart (never pkill — would take the engine down too). Match
+# the real java by pf.home with a trailing space so node 1 != node 2's -2 path.
+function _pf1_pids() { pgrep -f "pf.home=${PF1_DIR} " 2>/dev/null || true; }
+function restart_console() {
+    info "Restarting PingFederate console to load new ldap.properties..."
+    [[ -f "$PF1_PID" ]] && { local p; p=$(cat "$PF1_PID" 2>/dev/null||true); [[ -n "$p" ]] && kill "$p" 2>/dev/null||true; }
+    local pids; pids=$(_pf1_pids); [[ -n "$pids" ]] && kill $pids 2>/dev/null || true
+    local i=0
+    while [[ $i -lt 45 ]]; do
+        pids=$(_pf1_pids)
+        [[ -z "$pids" ]] && ! ss -ltn 2>/dev/null | grep -q ":${PINGFED_ADMIN_PORT} " && break
+        sleep 2; ((i++)) || true
+    done
+    pids=$(_pf1_pids); [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
+    mkdir -p "$LOG_DIR"
+    ( cd "$PF1_DIR" && setsid bash -c 'exec ./bin/run.sh' > "$PF_RUN_LOG" 2>&1 </dev/null & )
+    i=0
+    while [[ $i -lt 48 ]]; do
+        local code; code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+            "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app" 2>/dev/null || echo 000)
+        [[ "$code" =~ ^(200|302|401)$ ]] && { success "Console back up"; return 0; }
+        sleep 5; ((i++)) || true
+    done
+    error "Console did not return after restart (see $PF_RUN_LOG)"; return 1
+}
 
 # Import one PingDirectory server cert (fetched from its LDAPS port) into PF's
 # trusted CA store. Self-signed end-entity certs are their own trust anchor.
@@ -101,6 +137,36 @@ function replicate() {
 }
 
 # -----------------------------------------------------------------------------
+# PingFederate ADMIN-CONSOLE auth (bin/ldap.properties) — the other PF->PD link.
+# The console authenticates admins against PingDirectory; ship it the same
+# security + HA as the datastore: LDAPS, both nodes for failover, and the
+# least-privilege service account as the search bind (it has read on ou=people
+# via ACI). Trust reuses the PD CAs already imported into PF. Only the CONSOLE
+# node uses ldap.properties (engines don't), so this restarts node 1 only.
+# -----------------------------------------------------------------------------
+function secure_ha_admin_auth() {
+    [[ -f "$LDAP_PROPS" ]] || { warning "ldap.properties absent — admin auth not LDAP-based; skipping"; return 0; }
+    local url="ldaps://${LDAPS_HOST}:${PINGDIR_LDAPS_PORT} ldaps://${LDAPS_HOST}:${PINGDIR2_LDAPS_PORT}"
+    if grep -qF "ldap.url=${url}" "$LDAP_PROPS"; then
+        info "Admin-auth ldap.properties already LDAPS + dual-node — skipping"; return 0
+    fi
+    info "Securing admin-console LDAP auth: LDAPS + failover + service-account bind..."
+    [[ -f "${LDAP_PROPS}.pre-ldaps" ]] || cp "$LDAP_PROPS" "${LDAP_PROPS}.pre-ldaps"
+
+    export JAVA_HOME="${JAVA_HOME:-}"
+    local obf; obf=$("${PF1_DIR}/bin/obfuscate.sh" "$LDAP_BIND_PASSWORD" 2>/dev/null | grep -oE 'OBF:[^[:space:]]+' | head -1)
+    [[ -n "$obf" ]] || { error "failed to obfuscate service-account password"; return 1; }
+
+    set_prop "$LDAP_PROPS" ldap.url            "$url"
+    set_prop "$LDAP_PROPS" ldap.username       "$LDAP_BIND_DN"
+    set_prop "$LDAP_PROPS" ldap.password       "$obf"
+    set_prop "$LDAP_PROPS" ldap.verifyHostname true
+    restart_console
+    pf_ready 40 5 || { error "admin login over LDAPS failed after restart — check PF trusted CAs"; return 1; }
+    success "Admin-console auth now LDAPS + dual-node failover (bind ${LDAP_BIND_DN})"
+}
+
+# -----------------------------------------------------------------------------
 section "PingFederate datastore — secure (LDAPS) + HA (failover)"
 if [[ "${PINGDIR_COUNT:-1}" -le 1 ]]; then
     info "PINGDIR_COUNT=${PINGDIR_COUNT:-1} — single directory node, no failover peer; skipping"
@@ -109,4 +175,5 @@ fi
 pf_ready 6 3 || { error "PF console API not reachable"; exit 1; }
 secure_datastore
 replicate
-success "PingFederate datastore is encrypted (LDAPS) and HA across both PingDirectory nodes"
+secure_ha_admin_auth
+success "PingFederate->PingDirectory is fully LDAPS + HA (datastore AND admin-console auth), failover across both nodes"

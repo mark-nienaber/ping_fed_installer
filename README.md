@@ -126,14 +126,17 @@ LB_ENABLED=true      # HAProxy front door, terminates TLS on :443
   serving OAuth/OIDC runtime. Because sessions and grants are externalized to the
   replicated directory, the engine is stateless — add more engines behind the LB
   to scale. Config is pushed console→engine via `/cluster/replicate`.
-- **PingFederate → PingDirectory link** — in clustered mode the datastore is
-  switched to **LDAPS** (PD's certs imported into PF's trust, `verifyHost` on) and
-  given **both** directory nodes as failover hostnames, so the PF→PD connection is
-  encrypted *and* survives a node outage (verified by stopping node 1 mid-flow —
-  SSO kept working via node 2). Built by `pingfed/secure_ha_datastore.sh`. The PD
-  self-signed certs carry the host IP (not `ping.example.com`) in their SAN, so
-  the datastore targets the IP; a production deployment would issue PD certs with
-  the service FQDN from a real CA.
+- **PingFederate → PingDirectory links** — in clustered mode **both** PF→PD
+  connections are hardened: the **runtime datastore** (user auth, sessions,
+  grants) *and* the **admin-console LDAP auth** (`bin/ldap.properties`) are
+  switched to **LDAPS** (PD's certs imported into PF's trusted-CA store,
+  `verifyHost` on) with **both** directory nodes listed for failover, and both use
+  the least-privilege `cn=pingfederate` service account. So the PF→PD path is
+  encrypted *and* survives a node outage — verified by stopping node 1 mid-flow:
+  end-user SSO **and** admin-console login both kept working via node 2. Built by
+  `pingfed/secure_ha_datastore.sh`. The PD self-signed certs carry the host IP
+  (not `ping.example.com`) in their SAN, so LDAPS targets the IP; a production
+  deployment would issue PD certs with the service FQDN from a real CA.
 - **Load balancer** — HAProxy terminates client TLS on `:443` and routes by Host
   to the PF engine tier (`ping.example.com`) and PA (`app.example.com`),
   re-encrypting to the HTTPS backends. The OIDC issuer and app URLs are rewired to

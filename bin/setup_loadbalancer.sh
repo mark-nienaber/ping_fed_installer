@@ -31,7 +31,15 @@ CFG="/etc/haproxy/haproxy.cfg"
 trap 'error "setup_loadbalancer.sh failed at line $LINENO"' ERR
 
 function need_haproxy() {
-    command -v haproxy >/dev/null || { error "haproxy not installed (dnf install haproxy)"; return 1; }
+    if ! command -v haproxy >/dev/null; then
+        info "haproxy not installed — installing it now..."
+        if command -v dnf >/dev/null;     then sudo dnf install -y haproxy
+        elif command -v yum >/dev/null;    then sudo yum install -y haproxy
+        elif command -v apt-get >/dev/null; then sudo apt-get update -y && sudo apt-get install -y haproxy
+        elif command -v zypper >/dev/null;  then sudo zypper install -y haproxy
+        else error "no supported package manager found to install haproxy"; return 1; fi
+    fi
+    command -v haproxy >/dev/null || { error "haproxy install failed"; return 1; }
     success "haproxy: $(haproxy -v 2>/dev/null | head -1)"
 }
 
@@ -72,6 +80,17 @@ function selinux_allow() {
 
 function write_config() {
     info "Writing ${CFG}..."
+    # The PingFederate runtime backend depends on the topology. A single node
+    # serves OAuth/OIDC runtime on its own engine port; a console+engine cluster
+    # serves it on node 2's engine port. Get this wrong and the LB routes to a
+    # dead port (503), so pick the port that actually has a listener.
+    local pf_servers
+    if [[ "${PINGFED_COUNT:-1}" -gt 1 ]]; then
+        pf_servers="    server pf-engine-2 127.0.0.1:${PINGFED2_ENGINE_PORT} ssl verify none check check-ssl"
+    else
+        pf_servers="    server pf-engine-1 127.0.0.1:${PINGFED_ENGINE_PORT} ssl verify none check check-ssl"
+    fi
+    info "LB pf_engine backend -> $(echo "$pf_servers" | grep -oE '127.0.0.1:[0-9]+') (PINGFED_COUNT=${PINGFED_COUNT:-1})"
     local tmp; tmp=$(mktemp)
     cat > "$tmp" <<CFG
 #-----------------------------------------------------------------------
@@ -108,8 +127,8 @@ frontend https_in
     use_backend pa_engine if is_app
     default_backend pa_engine
 
-# PingFederate engine cluster (OIDC runtime). Add engine nodes here as the
-# cluster scales; the LB URL is the OIDC issuer.
+# PingFederate runtime (OIDC issuer = the LB URL). One server line for a single
+# node, or node 2's engine for a cluster; add more as engines are added to scale.
 backend pf_engine
     balance roundrobin
     # Health check over TLS (check-ssl) with a Host header — PF/Jetty 400s a
@@ -117,7 +136,7 @@ backend pf_engine
     option httpchk
     http-check send meth GET uri /pf/heartbeat.ping hdr Host ${LB_HOSTNAME_PF}
     http-check expect status 200
-    server pf-engine-2 127.0.0.1:${PINGFED2_ENGINE_PORT} ssl verify none check check-ssl
+${pf_servers}
 
 # PingAccess engine (app enforcement point).
 backend pa_engine

@@ -12,6 +12,10 @@ logs/
 # Claude local config
 .claude/settings.local.json
 
+# Python bytecode from the diagram tooling
+__pycache__/
+*.pyc
+
 # Editor / OS cruft
 .DS_Store
 *.swp

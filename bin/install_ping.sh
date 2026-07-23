@@ -490,7 +490,7 @@ setup_logging
 banner "Ping Installer (PingDirectory + PingFederate + PingAccess)"
 info "Started at $(date)"
 info "Phases:  Phase1=${_RUN_PHASE1} Phase2=${_RUN_PHASE2} Phase3=${_RUN_PHASE3}  Force=${_FORCE}"
-info "Counts:  PD=${PINGDIR_COUNT} PF=${PINGFED_COUNT} PA=${PINGACCESS_COUNT}"
+info "Counts:  PD=${PINGDIR_COUNT} PF=${PINGFED_COUNT}  (PingAccess: single instance)"
 
 preflight_checks
 

@@ -212,14 +212,33 @@ function configure_firewall() {
 # -----------------------------------------------------------------------------
 # Driver
 # -----------------------------------------------------------------------------
+# Install HAProxy, but only when the load balancer is enabled. Nothing else in
+# the stack needs it, so a single-node install never pulls it in.
+function install_loadbalancer() {
+    if [[ "${LB_ENABLED:-false}" != "true" ]]; then
+        info "LB_ENABLED=false — skipping HAProxy install"; return 0
+    fi
+    if command -v haproxy >/dev/null; then
+        success "haproxy already installed: $(haproxy -v 2>/dev/null | head -1)"; return 0
+    fi
+    info "Installing HAProxy (LB_ENABLED=true)..."
+    if command -v dnf >/dev/null;      then sudo dnf install -y haproxy
+    elif command -v yum >/dev/null;     then sudo yum install -y haproxy
+    elif command -v apt-get >/dev/null; then sudo apt-get update -y && sudo apt-get install -y haproxy
+    elif command -v zypper >/dev/null;  then sudo zypper install -y haproxy
+    else error "no supported package manager found to install haproxy"; return 1; fi
+    command -v haproxy >/dev/null && success "haproxy installed" || { error "haproxy install failed"; return 1; }
+}
+
 function run_all() {
     banner "Ping Installer — Host Prerequisites"
-    step_init 6
+    step_init 7
     step_begin "Create install user";        create_install_user;  step_end
     step_begin "Install OpenJDK ${JDK_VERSION}"; install_java;      step_end
     step_begin "Create directories";          create_directories;  step_end
     step_begin "Update /etc/hosts";           update_hosts;         step_end
     step_begin "Configure OS limits";         set_system_limits;    step_end
+    step_begin "Install load balancer";       install_loadbalancer; step_end
     step_begin "Open firewall ports";         configure_firewall;   step_end
     success "Host prerequisites complete — you can now run ./bin/install_ping.sh --all"
 }
@@ -231,6 +250,7 @@ case "${1:-all}" in
     dirs)     create_directories ;;
     hosts)    update_hosts ;;
     limits)   set_system_limits ;;
+    lb)       install_loadbalancer ;;
     firewall) configure_firewall ;;
-    *) echo "Usage: $0 {all|java|user|dirs|hosts|limits|firewall}"; exit 1 ;;
+    *) echo "Usage: $0 {all|java|user|dirs|hosts|limits|lb|firewall}"; exit 1 ;;
 esac

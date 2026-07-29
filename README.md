@@ -135,28 +135,28 @@ before anything else. Every step after this runs as this user.
 1. As root or an existing sudoer, create the user and grant it passwordless sudo:
 
    ```bash
-   sudo useradd -m -s /bin/bash ping
-   sudo usermod -aG wheel ping                 # use 'sudo' instead of 'wheel' on Debian/Ubuntu
-   echo 'ping ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/ping
-   sudo chmod 440 /etc/sudoers.d/ping
+   sudo useradd -m -s /bin/bash fradmin
+   sudo usermod -aG wheel fradmin              # use 'sudo' instead of 'wheel' on Debian/Ubuntu
+   echo 'fradmin ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/fradmin
+   sudo chmod 440 /etc/sudoers.d/fradmin
    ```
 
 2. Log in as that user, and stay as this user from here on:
 
    ```bash
-   sudo -iu ping
+   sudo -iu fradmin
    ```
 
 3. Put the installer where this user can read it, and set the user in the config:
 
    ```bash
    cd /path/to/ping_fed_installer
-   sed -i 's/^INSTALL_USER=.*/INSTALL_USER="ping"/' pingconfig.env
+   sed -i 's/^INSTALL_USER=.*/INSTALL_USER="fradmin"/' pingconfig.env
    ```
 
 ### Step 2: quick start
 
-Run every command below as the `ping` user from Step 1.
+Run every command below as the `fradmin` user from Step 1.
 
 ```bash
 # 1. Stage the product zips and licenses under software/ (already present):

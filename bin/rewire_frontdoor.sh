@@ -57,6 +57,31 @@ function pf_replicate() {
     rm -f "$tmp"
 }
 
+# In HA the baseUrl change must reach the engine and show up in its OIDC discovery
+# before PingAccess re-fetches it. If PA fetches too early it caches the console
+# port (which serves no runtime in a cluster) and every login fails to connect.
+function wait_pf_discovery_lb() {
+    local want="${PF_BASE_URL}/as/authorization.oauth2" i=0 got
+    info "Waiting for PF discovery to advertise the load-balancer endpoints..."
+    while [[ $i -lt 20 ]]; do
+        got=$(curl -sk "${PF_BASE_URL}/.well-known/openid-configuration" 2>/dev/null \
+            | python3 -c "import sys,json;print(json.load(sys.stdin).get('authorization_endpoint',''))" 2>/dev/null || true)
+        [[ "$got" == "$want" ]] && { success "discovery now advertises ${PF_BASE_URL}"; return 0; }
+        sleep 3; i=$((i+1))
+    done
+    warning "PF discovery still not at the LB endpoint (got: ${got:-none}); PA may cache a stale endpoint"
+    return 0
+}
+
+# Force PA to re-read PF discovery once everything is settled. The stored config
+# does not change, but the PUT refreshes PA's cached authorization endpoint.
+function pa_refresh_discovery() {
+    local body; body=$(pa_request GET /pingfederate/runtime)
+    pa_request PUT /pingfederate/runtime "$body" >/dev/null 2>&1
+    [[ "$_PING_HTTP_CODE" =~ ^20 ]] && success "PA discovery cache refreshed" \
+        || warning "PA discovery refresh HTTP $_PING_HTTP_CODE"
+}
+
 # ---- PingAccess: token-provider issuer + app virtual host port ----------------
 function pa_set_issuer() {
     local body; body=$(pa_request GET /pingfederate/runtime)
@@ -101,7 +126,9 @@ fi
 pf_ready 6 3 || { error "PF console API not reachable"; exit 1; }
 pf_set_base_url
 pf_replicate
+wait_pf_discovery_lb
 pa_ready 6 3 || { error "PA admin API not reachable"; exit 1; }
 pa_set_issuer
 pa_vhost_443
+pa_refresh_discovery
 success "Front-door rewire complete: issuer + app now served via https://${LB_HOSTNAME_PF} / https://${LB_HOSTNAME_APP}"

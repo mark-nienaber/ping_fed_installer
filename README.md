@@ -1,11 +1,12 @@
-# Ping Installer — PingDirectory + PingFederate + PingAccess
+# Ping Installer: PingDirectory, PingFederate and PingAccess
 
-An automated, phased installer that stands up a **fully integrated Ping stack** on a
-single host and configures it the way a real customer runs it — including
-**externalized SSO-session and OAuth-grant storage in PingDirectory** (not in memory).
+An automated, phased installer that stands up a fully integrated Ping stack on a
+single host and configures it the way a real customer runs it, including
+externalized SSO session and OAuth grant storage in PingDirectory rather than in
+memory.
 
-Modeled structurally on the ForgeRock `ping_platform_installer` (three-phase bash
-orchestration, state tracking, idempotent Admin-API configuration).
+It is modeled on the ForgeRock `ping_platform_installer`: three phase bash
+orchestration, state tracking, and idempotent Admin API configuration.
 
 ---
 
@@ -13,140 +14,124 @@ orchestration, state tracking, idempotent Admin-API configuration).
 
 | Order | Product | Version | Role in the stack |
 |:-:|---|---|---|
-| 1 | **PingDirectory** | 11.1.0.0 | LDAP user store **+** session / OAuth-grant store |
-| 2 | **PingFederate** | 13.1.1 | Federation, OAuth 2.0 / OIDC token service |
-| 3 | **PingAccess** | 9.1.0 | Access gateway / reverse proxy (enforcement point) |
+| 1 | PingDirectory | 11.1.0.0 | LDAP user store, plus session and OAuth grant store |
+| 2 | PingFederate | 13.1.1 | Federation, OAuth 2.0 and OIDC token service |
+| 3 | PingAccess | 9.1.0 | Access gateway and reverse proxy (the enforcement point) |
 
 Products install in dependency order: the data store first, the token service
-second (it depends on the directory), the gateway last (it depends on the token
-service). How many of each, and whether a load balancer fronts them, is set in
-`pingconfig.env` — see [Architecture](#architecture) below. The shipped config
-builds the highly available topology (`PINGDIR_COUNT=2`, `PINGFED_COUNT=2`,
-`LB_ENABLED=true`); set the counts to 1 and `LB_ENABLED=false` for a single node.
+second (it depends on the directory), and the gateway last (it depends on the
+token service). Whether the stack is a single node or a highly available cluster is
+set with one flag, `HA`, in `pingconfig.env`. The load balancer is always part of
+the stack. See [Architecture](#architecture) below.
 
 ---
 
 ## Architecture
 
-The architecture is **driven entirely by `pingconfig.env`**. The same scripts build
-either a clustered, load-balanced, highly available deployment or a single
-integrated node — the orchestrator runs, or skips, PingDirectory replication,
-PingFederate clustering, the LDAPS/failover hardening and the load balancer to
-match the instance counts and the `LB_ENABLED` flag. The rest of this section
-assumes the highly available shape (the shipped default); [the simpler single-node
-option](#simpler-a-single-node) is the same stack with those pieces switched off.
+The shape of the deployment is driven by one flag, `HA`, in `pingconfig.env`. The
+same scripts build either a single integrated node or a two node replicated and
+clustered deployment. The orchestrator runs or skips PingDirectory replication,
+PingFederate clustering, and the LDAPS and failover hardening to match. The load
+balancer, an HAProxy front door on `:443`, is always part of the stack.
 
-Whatever the scale, the **logical integration is identical** — a browser reaching a
+Whatever the scale, the logical integration is identical. A browser reaching a
 protected app is redirected to PingFederate, which authenticates against
-PingDirectory and **persists the resulting session + OAuth grants back into
-PingDirectory** rather than holding them in memory:
+PingDirectory and persists the resulting session and OAuth grants back into
+PingDirectory instead of holding them in memory.
 
-![The integrated stack the installer builds: browser reaches PingAccess, is redirected to PingFederate, which authenticates against PingDirectory and persists the SSO session and OAuth grants back into the directory](docs/images/arch-overview.png)
+![The integrated stack the installer builds: a browser reaches PingAccess, is redirected to PingFederate, which authenticates against PingDirectory and persists the SSO session and OAuth grants back into the directory](docs/images/arch-overview.png)
 
-### Highly available (the shipped default)
+### The topology
 
-```bash
-PINGDIR_COUNT=2      # 2-node PingDirectory replication
-PINGFED_COUNT=2      # PingFederate console + engine cluster
-LB_ENABLED=true      # HAProxy front door on :443 — installed automatically
-```
+![One topology behind the load balancer: HAProxy on :443 routes app.example.com to PingAccess and ping.example.com to PingFederate; PingAccess reaches PingFederate through the load balancer; PingFederate reaches PingDirectory directly over LDAPS; the second PingFederate and PingDirectory node is dashed and added by HA=true](docs/images/topology.png)
 
-![Clustered topology: HAProxy on :443 fronts PingAccess and a PingFederate console+engine cluster, which reaches a two-node replicated PingDirectory over LDAPS with failover](docs/images/ha-topology.png)
+Both modes are the same shape. HAProxy is the single front door on `:443` and
+routes by Host: `app.example.com` to PingAccess, `ping.example.com` to
+PingFederate. PingAccess sits behind the load balancer and reaches PingFederate
+*through* it, because its token-provider issuer is the load-balancer URL. It never
+talks to an engine node directly, so failover and scaling are transparent.
+PingFederate reaches PingDirectory directly over LDAPS. `HA` only sets how many
+PingFederate and PingDirectory nodes sit behind the load balancer.
 
-- **PingDirectory** — node 2 installs to its own dir/ports, joins node 1 via
-  `dsreplication`, and is initialized from it; writes replicate both ways. Grant
-  indexes are created on each node (index config isn't replicated).
-- **PingFederate** — node 1 becomes `CLUSTERED_CONSOLE` (admin/config authority),
-  node 2 a `CLUSTERED_ENGINE` cloned from node 1 (shared `pf.jwk` + cluster key)
-  serving OAuth/OIDC runtime. Because sessions and grants are externalized to the
-  replicated directory, the engine is stateless — add more engines behind the LB
-  to scale. Config is pushed console→engine via `/cluster/replicate`.
-- **PingFederate → PingDirectory links** — in clustered mode **both** PF→PD
-  connections are hardened: the **runtime datastore** (user auth, sessions,
-  grants) *and* the **admin-console LDAP auth** (`bin/ldap.properties`) are
-  switched to **LDAPS** (PD's certs imported into PF's trusted-CA store,
-  `verifyHost` on) with **both** directory nodes listed for failover, and both use
-  the least-privilege `cn=pingfederate` service account. So the PF→PD path is
-  encrypted *and* survives a node outage — verified by stopping node 1 mid-flow:
-  end-user SSO **and** admin-console login both kept working via node 2. Built by
-  `pingfed/secure_ha_datastore.sh`. The PD self-signed certs carry the host IP
-  (not `ping.example.com`) in their SAN, so LDAPS targets the IP; a production
-  deployment would issue PD certs with the service FQDN from a real CA.
-- **Load balancer** — HAProxy is **installed automatically** when `LB_ENABLED=true`
-  (via the host package manager), then configured to terminate client TLS on `:443`
-  and route by Host to the PingFederate runtime (`ping.example.com`) and PingAccess
-  (`app.example.com`), re-encrypting to the HTTPS backends. The OIDC issuer and app
-  URLs are rewired to the LB (no port), so the entire SSO flow transits the front
-  door. The backend points at whichever PingFederate engine port is actually live,
-  so the same front door fronts a single node or a cluster.
+### HA=false (default)
 
-Built by `pingdir/cluster_pingdir.sh`, `pingfed/cluster_pingfed.sh`,
-`pingfed/secure_ha_datastore.sh`, `bin/setup_loadbalancer.sh` and
-`bin/rewire_frontdoor.sh` — all invoked automatically by the orchestrator when the
-counts / `LB_ENABLED` warrant. This is a single-host demo (co-located, port-offset);
-real deployments put one node per host on identical ports.
+One PingFederate and one PingDirectory behind the load balancer. The orchestrator
+skips replication, PingFederate clustering, and the LDAPS failover hardening. The
+integration, the externalized session and grant storage, and the login flow are
+the same as HA=true.
 
-### Simpler: a single node
+### HA=true
 
-Set the counts to 1 and disable the load balancer:
+Adds the second node of each (the dashed boxes above):
 
-```bash
-PINGDIR_COUNT=1
-PINGFED_COUNT=1
-LB_ENABLED=false
-```
+- PingDirectory: node 2 installs to its own directory and ports, joins node 1 with
+  `dsreplication`, and is initialized from it. Writes replicate both ways. Grant
+  indexes are created on each node because index config is not replicated.
+- PingFederate: node 1 becomes the clustered console (the admin and config
+  authority) and node 2 a clustered engine cloned from node 1 (shared `pf.jwk` and
+  cluster key). Because sessions and grants are externalized to the replicated
+  directory, the engine holds no state, so you can add more engines behind the load
+  balancer to scale. Config is pushed from console to engine with
+  `/cluster/replicate`.
+- PingFederate to PingDirectory links: both connections are hardened to LDAPS with
+  both directory nodes listed for failover, binding as the least-privilege
+  `cn=pingfederate` service account. The path is encrypted and survives a node
+  outage, which was checked by stopping node 1 mid flow: end user login and admin
+  console login both kept working through node 2. The PingDirectory self signed
+  certs carry the host IP in their SAN, so LDAPS targets the IP; a production
+  deployment would issue certs with the service FQDN from a real CA.
 
-The orchestrator skips replication, PingFederate clustering, the LDAPS/failover
-hardening and the load balancer entirely — PingFederate serves OIDC directly on
-`:9031` and PingAccess on `:3000`. The integration, the externalized session and
-grant storage, and the end-to-end SSO flow are all identical. You can also put a
-single node **behind** the load balancer (`LB_ENABLED=true` with the counts at 1):
-the front door still works, because its backend targets the live engine's port.
+These pieces are built by `pingdir/cluster_pingdir.sh`,
+`pingfed/cluster_pingfed.sh`, `pingfed/secure_ha_datastore.sh`,
+`bin/setup_loadbalancer.sh` and `bin/rewire_frontdoor.sh`, all invoked
+automatically by the orchestrator when `HA=true`. This is a single host demo with
+colocated, port offset instances; a real deployment puts one node per host on
+identical ports.
 
 ### Why sessions live in PingDirectory
 
-In-memory sessions are lost on every PingFederate restart and cannot be shared
+Sessions held in memory are lost on every PingFederate restart and cannot be shared
 across engine nodes. Externalizing them to PingDirectory makes sessions durable and
-cluster-ready — the standard production customer pattern. Toggle with
-`PINGFED_SESSION_STORAGE` in `pingconfig.env` (`pingdirectory` | `memory`).
+ready for clustering, which is the standard production pattern. Toggle it with
+`PINGFED_SESSION_STORAGE` in `pingconfig.env` (`pingdirectory` or `memory`).
 
-![Memory vs PingDirectory session storage: memory is lost on restart and cannot be shared across engines; the directory makes sessions durable, shared, and indexed](docs/images/externalized-storage.png)
+![Memory versus PingDirectory session storage: memory is lost on restart and cannot be shared across engines; the directory makes sessions durable, shared and indexed](docs/images/externalized-storage.png)
 
 ### One login, end to end
 
-This is what the installer proves: a browser reaches the protected app, is bounced
+This is what the installer proves. A browser reaches the protected app, is bounced
 through PingFederate to sign in against PingDirectory, and lands back on the app
-carrying an injected identity header — with the SSO session written to the directory.
+carrying an injected identity header, with the SSO session written to the directory.
 
 ![Sequence of a full single sign-on: the browser, PingAccess, PingFederate and PingDirectory exchanging redirects and tokens until the app returns X-USER: testuser1](docs/images/sso-flow.png)
 
-**Customer-realistic details** the installer bakes in:
-- PingFederate reaches PingDirectory as a **least-privilege service account**
-  (`cn=pingfederate,ou=applications,…`), not the directory root. ACIs grant it
-  exactly what it needs: read on `ou=people`, read/write on the grant + session
-  containers.
-- The OAuth grant store is **indexed** in PingDirectory (equality on the grant
-  lookup attributes, ordering on the expiry attribute) so lookup and cleanup stay
-  index-backed as the store grows.
-- PingFederate admins authenticate against PingDirectory over LDAP (no in-product
-  native admin), so the whole stack is provisioned headlessly with no first-login
-  setup wizard.
+Details the installer bakes in to match a real customer:
+
+- PingFederate reaches PingDirectory as a service account with least privilege
+  (`cn=pingfederate,ou=applications,...`), not the directory root. ACIs grant it
+  exactly what it needs: read on `ou=people`, read and write on the grant and
+  session containers.
+- The OAuth grant store is indexed in PingDirectory (equality on the grant lookup
+  attributes, ordering on the expiry attribute) so lookups and cleanup stay backed
+  by an index as the store grows.
+- PingFederate admins authenticate against PingDirectory over LDAP, so the whole
+  stack is provisioned with no first login setup wizard.
 
 ---
 
 ## Install flow
 
-Everything is driven by `pingconfig.env` and run in three re-runnable phases.
-Phase completion is tracked in `.install-state`; re-runs skip completed phases
-unless `--force` is given. All configuration is idempotent (check-then-create),
-so any phase can be safely re-run.
+Everything is driven by `pingconfig.env` and runs in three phases that can be
+rerun. Phase completion is tracked in `.install-state`, so reruns skip completed
+phases unless `--force` is given. All configuration is idempotent (check then
+create), so any phase is safe to run again.
 
-![The three installer phases as a pipeline — Phase 1 install, Phase 2 configure, Phase 3 integrate — with a card per product summarising what Phase 2 configures and a note on dependency order](docs/images/install-phases.png)
+![The three installer phases as a pipeline: Phase 1 install, Phase 2 configure, Phase 3 integrate, with a card per product summarising what Phase 2 configures and a note on dependency order](docs/images/install-phases.png)
 
 ### Quick start
 
 ```bash
-# 1. Drop product zips + licenses into software/ (already present):
+# 1. Drop product zips and licenses into software/ (already present):
 #      software/pd/PingDirectory-*.zip + *.lic
 #      software/pf/pingfederate-*.zip   + *.lic
 #      software/pa/pingaccess-*.zip     + *.lic
@@ -165,101 +150,116 @@ vi pingconfig.env
 ./bin/install_ping.sh --phase2 --force
 ```
 
-### Operate
+### Reinstall from scratch
 
-![The operator toolbox — one card per script (setup, orchestrator, control, validate, monitor, web dashboard, logs, SSO test) — each aware of the instance counts and load-balancer setting](docs/images/operator-tooling.png)
+To recover from a corrupted or partial install, or to rebuild after changing the
+topology in `pingconfig.env`, use `--reinstall`. It stops the stack, removes the
+product directories and `.install-state`, then runs all three phases fresh:
 
 ```bash
-# Lifecycle for the WHOLE system (both PD nodes, PF console+engine, PA, sample
-# app, HAProxy) — dependency-ordered; which components are "all" follows the
-# *_COUNT / LB_ENABLED settings. Targets: pd pd2 pf pf2 pa app lb all
-./bin/ping-control.sh start all
-./bin/ping-control.sh restart pf2       # e.g. bounce just the PF engine node
-./bin/ping-control.sh status all
-
-./bin/ping-control.sh start dash        # live VISUAL web dashboard (auto-refresh)
-                                        #   -> http://<server>:8600/  (topology, replication,
-                                        #      cluster, PF->PD link, LB routing, per-JVM memory)
-./bin/ping-monitor.sh                   # same data, terminal: replication, cluster,
-./bin/ping-monitor.sh --watch 5         #   PF->PD link, LB routing, per-JVM RSS
-./bin/ping-validate.sh                  # mode-aware health checks (23/23 clustered)
-./bin/ping-logs.sh -f pf                # tail product logs (-f follow, -e errors)
-./bin/ping-test-sso.sh                  # drive the end-to-end browser SSO flow
+./bin/install_ping.sh --reinstall
 ```
 
-> PingFederate takes a while to start (JVM + engine warm-up). `ping-control.sh`
-> starts it detached (`setsid`) and waits on the port, so a slow start won't
-> leave a half-started process. It matches each PF node by its `pf.home`, so
-> stopping the console never touches the engine (and vice-versa).
+On an interactive terminal it asks for confirmation first. A non interactive run
+(a script or a remote runner) proceeds without prompting, so recovery stays a
+single command. It does not restart services on failure, by design, so you can
+deliberately break the running system to test failure scenarios and rebuild it when
+you are ready.
+
+### Operate
+
+![The operator toolbox: one card per script (setup, orchestrator, control, validate, monitor, web dashboard, logs, SSO test), each aware of the instance counts and the load balancer setting](docs/images/operator-tooling.png)
+
+```bash
+# Lifecycle for the whole system (both PD nodes, PF console and engine, PA, sample
+# app, HAProxy), dependency ordered. Which components count as "all" follows the
+# HA setting. Targets: pd pd2 pf pf2 pa app lb all
+./bin/ping-control.sh start all
+./bin/ping-control.sh restart pf2       # for example, bounce just the PF engine node
+./bin/ping-control.sh status all
+
+./bin/ping-control.sh start dash        # live web dashboard (auto refresh)
+                                        #   http://<server>:8600/  (topology, replication,
+                                        #   cluster, PF to PD link, LB routing, per JVM memory)
+./bin/ping-monitor.sh                   # the same data in the terminal
+./bin/ping-monitor.sh --watch 5
+./bin/ping-validate.sh                  # health checks that adapt to the current mode
+./bin/ping-logs.sh -f pf                # tail product logs (-f follow, -e errors)
+./bin/ping-test-sso.sh                  # drive the login flow from end to end
+```
+
+> PingFederate takes a while to start (JVM and engine warm up). `ping-control.sh`
+> starts it detached with `setsid` and waits on the port, so a slow start does not
+> leave a half started process. It matches each PF node by its `pf.home`, so
+> stopping the console never touches the engine, and the other way round.
 
 ---
 
-## Accessing & testing the stack
+## Accessing and testing the stack
 
 ### 1. Make the hostnames resolve
 
 The stack uses the virtual hostnames `ping.example.com` (PingFederate) and
 `app.example.com` (the protected app). On the install host they already map to
-`127.0.0.1`. To reach it from a browser on **another machine**, add both names to
-*that machine's* hosts file, pointing at the server's IP:
+`127.0.0.1`. To reach it from a browser on another machine, add both names to that
+machine's hosts file, pointing at the server IP:
 
 ```
-# /etc/hosts (Linux/macOS)  or  C:\Windows\System32\drivers\etc\hosts
+# /etc/hosts (Linux or macOS)  or  C:\Windows\System32\drivers\etc\hosts
 192.168.58.111  ping.example.com app.example.com
 ```
 
-Every certificate is self-signed, so browsers/`curl` will warn — accept the
-exception (or use `curl -k`).
+Every certificate is self signed, so browsers and curl will warn. Accept the
+exception, or use `curl -k`.
 
-**Firewall:** on RHEL/CentOS, `firewalld` is on by default and blocks every
-product port to remote machines even though the services listen on all
-interfaces — so from another host the admin consoles and app just time out.
-`./bin/ping-setup.sh` opens the stack's ports; to (re)open them on their own run:
+Firewall: on RHEL and CentOS, firewalld is on by default and blocks every product
+port to remote machines even though the services listen on all interfaces, so from
+another host the admin consoles and the app time out. `./bin/ping-setup.sh` opens
+the ports; to open them on their own run:
 
 ```bash
-./bin/ping-setup.sh firewall      # opens 443/9999/9000/9031-9032/3000/1389/1636/1443/…
+./bin/ping-setup.sh firewall      # opens 443, 9999, 9000, 9031, 9032, 3000, 1389, 1636, 1443 and more
 ```
 
-### 2. Endpoints & credentials
+### 2. Endpoints and credentials
 
-The passwords below are the dev `DEFAULT_PASSWORD` from `pingconfig.env` —
-**change them before production.**
+The passwords below are the development `DEFAULT_PASSWORD` from `pingconfig.env`.
+Change them before production.
 
 | What | URL | Username | Password |
 |---|---|---|---|
-| **Protected app** — start here | clustered+LB: `https://app.example.com/`<br>single-node: `https://app.example.com:3000/` | *(end-user, below)* | |
-| End-user login (HTML form) | *(you're redirected to PingFederate)* | `testuser1` … `testuser5` | `2FederateM0re!` |
-| PingFederate admin console | `https://ping.example.com:9999/pingfederate/app` | `pfadmin` | `2FederateM0re!` |
-| PingAccess admin console | `https://ping.example.com:9000/` | `administrator` | `2FederateM0re!` |
-| PingDirectory (LDAP) | `ldap://ping.example.com:1389` (node&nbsp;1) · `:2389` (node&nbsp;2) | `cn=Directory Manager` | `2FederateM0re!` |
-| OIDC discovery | clustered+LB: `https://ping.example.com/.well-known/openid-configuration`<br>single-node: `https://ping.example.com:9031/.well-known/openid-configuration` | — | — |
+| Protected app, start here | `https://app.example.com/` | end user, below | |
+| End user login (HTML form) | you are redirected to PingFederate | testuser1 to testuser5 | 2FederateM0re! |
+| PingFederate admin console | `https://ping.example.com:9999/pingfederate/app` | pfadmin | 2FederateM0re! |
+| PingAccess admin console | `https://ping.example.com:9000/` | administrator | 2FederateM0re! |
+| PingDirectory (LDAP) | `ldap://ping.example.com:1389` (node 1), `:2389` (node 2) | cn=Directory Manager | 2FederateM0re! |
+| OIDC discovery | `https://ping.example.com/.well-known/openid-configuration` | | |
 
-> PingFederate admins sign in as an **LDAP user in PingDirectory** — `pfadmin` is
+> PingFederate admins sign in as an LDAP user in PingDirectory. pfadmin is
 > provisioned there by the installer, not a native PingFederate account. There is
-> deliberately no first-login setup wizard.
+> deliberately no first login setup wizard.
 
 ### 3. Test the protected app (the main flow)
 
-1. Browse to **`https://app.example.com/`** (clustered+LB) or
-   **`https://app.example.com:3000/`** (single-node).
+1. Browse to `https://app.example.com/`.
 2. PingAccess sees no session and redirects you to the PingFederate login form.
-3. Sign in as **`testuser1` / `2FederateM0re!`**.
+3. Sign in as testuser1 with password 2FederateM0re!.
 4. You land back on the app, which prints the injected identity header
-   **`X-USER: testuser1`** — proof the full chain worked: PingAccess → PingFederate
-   → PingDirectory, with the SSO session persisted to the directory (and, in
-   clustered mode, everything transiting the load balancer on `:443`).
+   `X-USER: testuser1`. That is proof the full chain worked: PingAccess to
+   PingFederate to PingDirectory, with the SSO session persisted to the directory,
+   and everything going through the load balancer front door on `:443`.
 
 ### 4. Quick checks from the command line
 
 ```bash
-# OIDC discovery — issuer is the LB URL (no port) in clustered mode
+# OIDC discovery. The issuer is the load balancer URL (no port) when a load balancer is on.
 curl -sk https://ping.example.com/.well-known/openid-configuration \
   | python3 -m json.tool | grep -E 'issuer|authorization_endpoint'
 
-# Unauthenticated app request -> 302 to PingFederate (proves PA->PF wiring)
+# An unauthenticated app request returns 302 to PingFederate, which proves the PA to PF wiring.
 curl -sk -D - -o /dev/null https://app.example.com/ | grep -i '^location'
 
-# Whole-stack health: 13 read-only checks
+# Whole stack health checks
 ./bin/ping-validate.sh
 ```
 
@@ -272,44 +272,44 @@ ping_fed_installer/
 ├── pingconfig.env          # single source of truth: hosts, ports, licenses, storage mode, flags
 ├── lib/
 │   ├── logging.sh          # shared CLI output (banners, steps, summary table)
-│   └── rest_helpers.sh     # idempotent pf_* / pa_* Admin-API verbs (basic auth + XSRF)
+│   └── rest_helpers.sh     # idempotent pf_* / pa_* Admin API verbs (basic auth + XSRF)
 ├── bin/
-│   ├── install_ping.sh     # phased orchestrator engine (state / preflight / rollback)
+│   ├── install_ping.sh     # phased orchestrator (state, preflight, rollback, reinstall)
 │   ├── ping-setup.sh       # host prerequisites (JDK, user, dirs, hosts, limits)
 │   ├── ping-control.sh     # start/stop/restart/status the whole system (pd pd2 pf pf2 pa app lb)
-│   ├── ping-monitor.sh     # terminal ops dashboard: replication, cluster, PF->PD link, LB, RSS
-│   ├── ping-dashboard.py   # live VISUAL web dashboard (stdlib server; start via ping-control dash)
-│   ├── ping-logs.sh        # tail / follow / error-filter product logs
-│   ├── ping-validate.sh    # mode-aware read-only stack health checks
-│   ├── ping-test-sso.sh    # end-to-end SSO flow driver
-│   ├── setup_loadbalancer.sh  # HA: HAProxy front door (TLS termination) + cert
-│   └── rewire_frontdoor.sh    # HA: point PF issuer / PA vhost at the LB URLs
+│   ├── ping-monitor.sh     # terminal ops view: replication, cluster, PF to PD link, LB, RSS
+│   ├── ping-dashboard.py   # live web dashboard (stdlib server; start via ping-control dash)
+│   ├── ping-logs.sh        # tail, follow or error filter product logs
+│   ├── ping-validate.sh    # read only stack health checks that adapt to the mode
+│   ├── ping-test-sso.sh    # end to end login flow driver
+│   ├── setup_loadbalancer.sh  # HAProxy front door (TLS termination) and cert
+│   └── rewire_frontdoor.sh    # point the PF issuer and PA vhost at the load balancer URLs
 ├── pingdir/
 │   ├── pingdir.sh              # Phase 1 install (extract, setup, start)
-│   ├── configure_pingdir.sh   # Phase 2: OUs, PF admin user/group, service acct, ACIs,
-│   │                          #          PF schema + session/grant containers, grant indexes
-│   ├── cluster_pingdir.sh     # HA: install node 2 + dsreplication enable/initialize
+│   ├── configure_pingdir.sh   # Phase 2: OUs, PF admin user and group, service acct, ACIs,
+│   │                          #          PF schema, session and grant containers, grant indexes
+│   ├── cluster_pingdir.sh     # install node 2 and enable and initialize dsreplication
 │   └── create_test_users.sh   # seed testuser1..N
 ├── pingfed/
 │   ├── pingfed.sh                 # Phase 1 install (extract, license, start)
-│   ├── configure_pingfed.sh       # Phase 2: LDAP admin auth, LDAP datastore (svc-acct bind),
-│   │                              #          externalized session/grant storage, setup-wizard bypass
-│   ├── configure_pingfed_sso.sh   # Phase 2: PCV, HTML-form IdP adapter, OAuth/OIDC clients + policy
-│   ├── cluster_pingfed.sh         # HA: console+engine cluster (clone node 2, replicate config)
-│   └── secure_ha_datastore.sh     # HA: switch PF->PD datastore to LDAPS + dual-node failover
+│   ├── configure_pingfed.sh       # Phase 2: LDAP admin auth, LDAP datastore (service acct bind),
+│   │                              #          externalized session and grant storage, wizard bypass
+│   ├── configure_pingfed_sso.sh   # Phase 2: PCV, HTML form IdP adapter, OAuth and OIDC clients and policy
+│   ├── cluster_pingfed.sh         # console and engine cluster (clone node 2, replicate config)
+│   └── secure_ha_datastore.sh     # switch PF to PD datastore to LDAPS with dual node failover
 ├── pingaccess/
 │   ├── pingaccess.sh              # Phase 1 install (extract, license, start)
-│   ├── configure_pingaccess.sh    # Phase 2: SLA/password rotate, PF token provider, vhost/site/app
+│   ├── configure_pingaccess.sh    # Phase 2: SLA and password rotate, PF token provider, vhost, site, app
 │   └── sample-app.py              # stdlib backend that echoes injected identity headers
-├── docs/images/            # README diagrams (generated PNG + SVG source)
-├── tooling/                # diagram generator — svgkit.py, diagrams.py, make_diagrams.py
-└── software/               # product zips + licenses  (gitignored, user-supplied)
+├── docs/images/            # README diagrams (generated PNG and SVG source)
+├── tooling/                # diagram generator: svgkit.py, diagrams.py, make_diagrams.py
+└── software/               # product zips and licenses (gitignored, user supplied)
     ├── pd/   pf/   pa/
 ```
 
-> **Diagrams** are generated, not hand-drawn: `python3 tooling/make_diagrams.py`
-> writes the SVG sources and renders the PNGs the README embeds (needs
-> `rsvg-convert` from librsvg). Edit `tooling/diagrams.py`, never the SVGs.
+> Diagrams are generated, not hand drawn. `python3 tooling/make_diagrams.py` writes
+> the SVG sources and renders the PNGs the README embeds (it needs `rsvg-convert`
+> from librsvg). Edit `tooling/diagrams.py`, never the SVGs.
 
 ---
 
@@ -318,50 +318,54 @@ ping_fed_installer/
 | Variable | Purpose |
 |---|---|
 | `BASE_INSTALL_DIR` | where all three products install (default `/ping`) |
-| `PING_HOSTNAME` | host all services bind/advertise (single-node) |
-| `DEFAULT_PASSWORD` | shared admin/service password — **change before production** |
+| `PING_HOSTNAME` | host that all services bind and advertise on a single node |
+| `DEFAULT_PASSWORD` | shared admin and service password. Change it before production |
 | `PINGFED_SESSION_STORAGE` | `pingdirectory` (externalized) or `memory` (dev) |
-| `PINGFED_SESSIONS_BASE_DN` / `PINGFED_GRANTS_BASE_DN` | where PF writes sessions / grants in PD |
-| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | least-privilege service account PF binds to PD as |
-| `PINGFED_ADMIN_UID` | LDAP user PF admins log in as (auth delegated to PD) |
-| `PINGDIR_COUNT` / `PINGFED_COUNT` | instance counts — 1 for single-node, 2 for a replicated / clustered tier (PingAccess is single-instance) |
+| `PINGFED_SESSIONS_BASE_DN` / `PINGFED_GRANTS_BASE_DN` | where PF writes sessions and grants in PD |
+| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | the least privilege service account PF binds to PD as |
+| `PINGFED_ADMIN_UID` | the LDAP user PF admins log in as (auth delegated to PD) |
+| `HA` | topology, the one knob: `false` (default) is a single node of each product behind the load balancer, `true` is a two node replicated and clustered tier. The instance counts are derived from it (PingAccess is always single instance) |
 | `INSTALL_SAMPLE_APP` / `INSTALL_TEST_USERS` / `INSTALL_OIDC_CLIENT` | optional Phase 3 content |
 
-Ports: PD LDAP 1389 / LDAPS 1636 (admin connector rides here) / HTTPS 1443
-(Admin API + SCIM) / replication 8989 (only when `PINGDIR_COUNT > 1`) · PF admin
-9999 / engine 9031 · PA admin 9000 / engine 3000 / agent 3030.
+Ports: PD LDAP 1389, LDAPS 1636 (the admin connector rides here), HTTPS 1443
+(Admin API and SCIM), replication 8989 (only when `HA=true`). PF admin
+9999, engine 9031. PA admin 9000, engine 3000, agent 3030.
 
-> **Dev vs. prod:** for developer convenience PF binds PingDirectory over
-> plaintext LDAP (`ldap://:1389`) and `dsconfig` trusts the self-signed cert
-> (`--trustAll`). For production, switch to LDAPS (`:1636`) with a real trust
-> store.
+> Development versus production: for convenience PingFederate binds PingDirectory
+> over plaintext LDAP (`ldap://:1389`) and `dsconfig` trusts the self signed cert
+> (`--trustAll`). For production, switch to LDAPS (`:1636`) with a real trust store.
 
 ---
 
 ## Status
 
-**Functionally complete and proven end-to-end on the reference host.**
+Functionally complete and verified end to end on the reference host.
 
-- ✅ Project scaffold, `pingconfig.env`, `lib/logging.sh`, `lib/rest_helpers.sh`
-- ✅ Orchestrator engine (`bin/install_ping.sh`) — phases, `.install-state`,
-  preflight, rollback
-- ✅ Phase 1 install — PingDirectory, PingFederate, PingAccess extracted,
-  licensed, started
-- ✅ Phase 2 configure — PD content/schema/ACIs + grant indexes; PF LDAP admin
-  auth, service-account datastore bind, externalized sessions + grants, IdP
-  adapter, OAuth/OIDC clients; PA token provider, vhost/site/app/identity mapping
-- ✅ Phase 3 integrate — PA → PF wiring, sample protected app, test users;
-  **browser SSO proven end-to-end** with the SSO session and OAuth grant landing
-  in PingDirectory
-- ✅ Operator scripts — control / logs / validate / test-sso (`ping-validate.sh`
-  currently reports 13/13)
-- ✅ **Clustered / HA mode** — 2-node PingDirectory replication, PingFederate
-  console+engine cluster, and an HAProxy front door terminating TLS on :443, all
-  COUNT/`LB_ENABLED`-driven. Verified end-to-end: browser SSO through the load
-  balancer returns the injected identity header, and the engine-written auth
-  session is present on **both** replicated directory nodes
+Installer:
 
-> **License note:** the supplied PingAccess license is `Version=9.0` while the
-> software is `9.1.0`. PingAccess validates license version at startup; in
-> practice 9.1.0 accepted the 9.0 development license here. All three licenses
-> expire **2026-08-18**.
+- Orchestrator with three phases, `.install-state` tracking, preflight and rollback.
+- `--reinstall` wipes and rebuilds in one command, for recovery from a corrupted or
+  partial install or after a topology change.
+- Phase 1 installs PingDirectory, PingFederate and PingAccess (extract, license, start).
+- Phase 2 configures PingDirectory (content, schema, ACIs, grant indexes),
+  PingFederate (LDAP admin auth, service account datastore bind, externalized
+  sessions and grants, IdP adapter, OAuth and OIDC clients) and PingAccess (token
+  provider, vhost, site, app, identity mapping).
+- Phase 3 wires PingAccess to PingFederate, deploys the sample app, and seeds test users.
+
+Verified in this build:
+
+- Default topology (`HA=false`, a single node behind the load balancer): install
+  completes, `ping-validate` reports 16 of 16, and the full browser login passes
+  (authenticate, token exchange, the protected app returns the injected identity,
+  and the session is persisted to PingDirectory).
+- High availability (`HA=true`, two node PingDirectory replication, a PingFederate
+  console and engine cluster, and the HAProxy front door): install completes,
+  `ping-validate` reports 23 of 23, and the browser login passes end to end through
+  the cluster.
+- The `--reinstall` path was exercised repeatedly, wiping and rebuilding cleanly
+  each time, including switching between the two topologies.
+
+> License note: the supplied PingAccess license is `Version=9.0` while the software
+> is `9.1.0`. PingAccess checks the license version at startup; in practice 9.1.0
+> accepted the 9.0 development license here. All three licenses expire 2026-08-18.

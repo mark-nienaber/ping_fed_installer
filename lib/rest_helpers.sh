@@ -53,14 +53,25 @@ function pf_request() {  # METHOD PATH [DATA]
 }
 
 function pf_ready() {    # [max_attempts] [sleep]
-    local max=${1:-40} nap=${2:-5} i=0
+    local max=${1:-40} nap=${2:-5} i=0 tmp
+    tmp=$(mktemp)
     info "Waiting for PingFederate admin API (auth as ${_PF_USER})..."
     while [[ $i -lt $max ]]; do
-        pf_request GET /version >/dev/null 2>&1
-        [[ "$_PING_HTTP_CODE" == "200" ]] && { success "PingFederate admin API ready"; return 0; }
-        ((i++)); sleep "$nap"
+        # Redirect to a file (not $( )) so pf_request runs in THIS shell and its
+        # _PING_HTTP_CODE side effect is visible here.
+        pf_request GET /version > "$tmp" 2>/dev/null
+        # 200 = fully ready. On a fresh install every endpoint except the license
+        # one returns 403 "license_agreement_not_accepted" until the EULA is
+        # accepted — but that response still proves the API is up and our admin
+        # credentials work, and the caller accepts the agreement immediately
+        # after, so treat it as ready too.
+        if [[ "$_PING_HTTP_CODE" == "200" ]] ||
+           { [[ "$_PING_HTTP_CODE" == "403" ]] && grep -q license_agreement_not_accepted "$tmp"; }; then
+            rm -f "$tmp"; success "PingFederate admin API ready"; return 0
+        fi
+        ((i++)) || true; sleep "$nap"
     done
-    error "PingFederate admin API not ready (last HTTP $_PING_HTTP_CODE)"; return 1
+    rm -f "$tmp"; error "PingFederate admin API not ready (last HTTP $_PING_HTTP_CODE)"; return 1
 }
 
 # Idempotent create: if GET exists_path is 200, skip; else PUT/POST create_path.
@@ -99,7 +110,7 @@ function pa_ready() {    # [max_attempts] [sleep]
     while [[ $i -lt $max ]]; do
         pa_request GET /version >/dev/null 2>&1
         [[ "$_PING_HTTP_CODE" == "200" ]] && { success "PingAccess admin API ready"; return 0; }
-        ((i++)); sleep "$nap"
+        ((i++)) || true; sleep "$nap"
     done
     error "PingAccess admin API not ready (last HTTP $_PING_HTTP_CODE)"; return 1
 }

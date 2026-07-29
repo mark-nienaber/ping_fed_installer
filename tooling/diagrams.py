@@ -130,64 +130,68 @@ def sso_flow(OUT):
 
 
 # ============================================================ 4. HA topology
-def ha_topology(OUT):
-    W, H = 1120, 740
-    s = SVG(W, H, "Clustered / load-balanced topology")
-    s.header("Clustered mode — set the counts, get an HA stack",
-             "PINGDIR_COUNT=2 · PINGFED_COUNT=2 · LB_ENABLED=true builds this instead of single-node")
+def platform_topology(OUT):
+    W, H = 1120, 780
+    s = SVG(W, H, "Platform topology")
+    s.header("One topology; HA is the only difference",
+             "Everything is behind the load balancer. HA sets how many PingFederate and PingDirectory nodes sit behind it — dashed = added by HA=true")
     cx = W / 2
 
-    s.node(cx - 120, 72, 240, 44, "Browser", sub="https · :443", fill=USER_FILL, stroke=USER_LINE,
+    s.node(cx - 120, 66, 240, 42, "Browser", sub="https · :443", fill=USER_FILL, stroke=USER_LINE,
            size=12.5, subsize=9.5)
-    s.node(cx - 210, 146, 420, 56, "HAProxy load balancer",
-           sub="terminates client TLS on :443 · routes by Host · re-encrypts to backends",
+    s.node(cx - 230, 138, 460, 58, "HAProxy load balancer",
+           sub="single front door on :443 · routes by Host · app.example.com + ping.example.com",
            fill=LB_FILL, stroke=LB_LINE, size=13.5, subsize=10)
-    s.line(cx, 116, cx, 146, sw=1.8)
+    s.line(cx, 108, cx, 138, sw=1.8)
 
-    # PA (left) + PF cluster (right)
-    pay = 258
-    s.node(96, pay, 300, 84, "PingAccess", sub="engine :3000 · app.example.com",
+    # PA (always 1) on the left; PF (node 1 always, node 2 added by HA) on the right
+    pay = 282
+    s.node(90, pay, 300, 84, "PingAccess", sub="engine :3000 · protects the app",
            fill=PA_FILL, stroke=PA_LINE, size=13.5, subsize=10)
-    s.container(470, pay - 16, 554, 116, "PINGFEDERATE CLUSTER", fill=SITE_FILL, stroke=PF_LINE, dash=None)
-    s.node(490, pay + 10, 248, 64, "node 1 · CONSOLE", sub="admin :9999 · config authority",
+    s.container(470, pay - 22, 560, 122, "PINGFEDERATE", fill=SITE_FILL, stroke=PF_LINE, dash=None)
+    s.node(490, pay + 6, 250, 66, "node 1", sub="always on",
            fill=PF_FILL, stroke=PF_LINE, size=12.5, subsize=9.5)
-    s.node(756, pay + 10, 248, 64, "node 2 · ENGINE", sub="runtime :9032 · stateless",
-           fill=PF_FILL, stroke=PF_LINE, size=12.5, subsize=9.5)
-    s.path(f"M 738 {pay+42} L 756 {pay+42}", both=True, stroke=PF_LINE, sw=1.5)
-    s.edge_label(747, pay + 32, "/cluster/replicate")
+    s.node(760, pay + 6, 250, 66, "node 2", sub="adds an engine",
+           fill=PF_FILL, stroke=PF_LINE, size=12.5, subsize=9.5, dash="5 4", badge="HA")
+    s.path(f"M 740 {pay+39} L 760 {pay+39}", both=True, stroke=PF_LINE, sw=1.5, dash="5 4")
+    s.edge_label(750, pay + 29, "cluster")
 
-    # HAProxy -> PA and -> PF engine, by Host — each arrow ends on its box border
-    s.path(f"M {cx-140} 202 L {cx-140} 228 L 246 228 L 246 {pay}", sw=1.6)
-    s.edge_label(246, 228, "app.example.com")
-    s.path(f"M {cx+140} 202 L {cx+140} 228 L 880 228 L 880 {pay-16}", sw=1.6)
-    s.edge_label(880, 228, "ping.example.com")
+    # LB -> PA (app.example.com) and LB -> PF (ping.example.com), by Host
+    s.path(f"M {cx-160} 196 L {cx-160} 232 L 240 232 L 240 {pay}", sw=1.6)
+    s.edge_label(310, 232, "app.example.com")
+    s.path(f"M {cx+160} 196 L {cx+160} 232 L 890 232 L 890 {pay-22}", sw=1.6)
+    s.edge_label(820, 232, "ping.example.com")
 
-    # PA -> PF (token provider = LB issuer) — ends on the PF cluster's left border
-    s.line(396, pay + 42, 470, pay + 42, sw=1.6)
-    s.edge_label(432, pay + 32, "token provider")
+    # PA -> LB -> PF: PingAccess reaches PingFederate THROUGH the LB (issuer =
+    # the LB URL), never an engine directly. Dashed arrow from PA back up to the LB.
+    s.path(f"M 390 {pay+30} L 430 {pay+30} L 430 196", sw=1.5, dash="5 4", stroke=PA_LINE)
+    s.edge_label(474, pay + 20, "token provider")
+    s.edge_label(430, 214, "via ping.example.com")
 
-    # PD replication
-    pdy = 470
-    s.container(300, pdy, 520, 150, "PINGDIRECTORY REPLICATION", fill=SITE_FILL, stroke=PD_LINE, dash=None)
+    # PD (node 1 always, node 2 added by HA and replicated)
+    pdy = 500
+    s.container(300, pdy, 520, 150, "PINGDIRECTORY", fill=SITE_FILL, stroke=PD_LINE, dash=None)
     s.node(322, pdy + 40, 230, 84, "node 1", sub="LDAPS :1636",
            fill=PD_FILL, stroke=PD_LINE, size=13, subsize=10)
     s.node(568, pdy + 40, 230, 84, "node 2", sub="LDAPS :2636",
-           fill=PD_FILL, stroke=PD_LINE, size=13, subsize=10)
-    s.path(f"M 552 {pdy+82} L 568 {pdy+82}", both=True, stroke=PD_LINE, sw=2)
-    s.edge_label(560, pdy + 72, "dsreplication")
-    s.caption(560, pdy + 138, "each node holds users · sessions · grants — writes replicate both ways")
+           fill=PD_FILL, stroke=PD_LINE, size=13, subsize=10, dash="5 4", badge="HA")
+    s.path(f"M 552 {pdy+82} L 568 {pdy+82}", both=True, stroke=PD_LINE, sw=2, dash="5 4")
+    s.edge_label(560, pdy + 72, "replication")
+    s.caption(560, pdy + 138, "each node holds users · sessions · grants")
 
-    # PF engine -> both PD nodes, LDAPS failover
-    s.path(f"M 750 {pay+100} L 750 442 L 437 442 L 437 {pdy+38}", sw=1.5, stroke=PF_LINE, dash="5 4")
-    s.path(f"M 750 {pay+100} L 750 442 L 683 442 L 683 {pdy+38}", sw=1.5, stroke=PF_LINE, dash="5 4")
-    s.edge_label(560, 442, "LDAPS · both nodes · failover")
+    # PingFederate -> PingDirectory: direct LDAPS (solid to node 1, dashed failover to node 2)
+    s.path(f"M 750 {pay+100} L 750 472 L 437 472 L 437 {pdy+38}", sw=1.5, stroke=PF_LINE)
+    s.path(f"M 750 {pay+100} L 750 472 L 683 472 L 683 {pdy+38}", sw=1.5, stroke=PF_LINE, dash="5 4")
+    s.edge_label(560, 472, "LDAPS direct · failover in HA")
 
-    s.callout(40, H - 66, W - 80,
-              "Every PF→PD link — the runtime datastore and the admin-console LDAP auth — is "
-              "LDAPS with both directory nodes listed for failover, binding as the least-privilege "
-              "cn=pingfederate service account. Stop node 1 mid-flow and SSO keeps working via node 2.",
-              title="Secure + highly available", kind="ok")
-    return [s.save(OUT / "ha-topology.svg")]
+    s.callout(40, H - 80, W - 80,
+              "PingAccess sits behind the load balancer and reaches PingFederate through it, at "
+              "ping.example.com — never an engine node directly, so failover and scaling are transparent. "
+              "HA=false is node 1 of each; HA=true adds the dashed second node: PingFederate becomes a "
+              "console + engine cluster and PingDirectory replicates, with the PF-to-PD link failing over "
+              "across both directory nodes over LDAPS.",
+              title="Everything through the front door", kind="note")
+    return [s.save(OUT / "topology.svg")]
 
 
 # ============================================================ 5. externalized storage
@@ -227,13 +231,13 @@ def operator_tooling(OUT):
     W, H = 1120, 430
     s = SVG(W, H, "Operator scripts that drive the stack")
     s.header("One toolbox drives the whole system",
-             "Every script is COUNT / LB_ENABLED aware — it manages exactly the components the config declares")
+             "Every script reads HA and manages exactly the components the config declares")
 
     cards = [
         ("ping-setup.sh", "Host prerequisites: JDK 21, install user, directories, /etc/hosts, "
          "ulimits, and firewall ports.", PD_LINE),
-        ("install_ping.sh", "The phased orchestrator — preflight, .install-state tracking, "
-         "--phase1/2/3, --force, rollback.", PF_LINE),
+        ("install_ping.sh", "The phased orchestrator: preflight, .install-state tracking, "
+         "--phase1/2/3, --force, --reinstall, rollback.", PF_LINE),
         ("ping-control.sh", "Start / stop / restart / status for pd pd2 pf pf2 pa app lb — "
          "dependency-ordered, detached, port-aware.", PA_LINE),
         ("ping-validate.sh", "Mode-aware read-only health checks — 23/23 green in clustered "
@@ -256,6 +260,6 @@ def operator_tooling(OUT):
 
 
 def build(OUT):
-    fns = (arch_overview, install_phases, sso_flow, ha_topology,
+    fns = (arch_overview, install_phases, sso_flow, platform_topology,
            externalized_storage, operator_tooling)
     return [p for fn in fns for p in fn(OUT)]

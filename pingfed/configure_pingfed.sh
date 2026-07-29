@@ -143,12 +143,26 @@ function restart_pingfed() {
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     fi
     pkill -f 'org.pingidentity.RunPF' 2>/dev/null || true
-    # Wait for admin port to close
+    # Wait for the JVM to actually exit, not just for the port to close. run.sh
+    # refuses to start while the pid in pingfederate.pid is still alive, so a
+    # port-only wait races the shutdown and the restart silently no-ops.
     local i=0
-    while [[ $i -lt 30 ]]; do
-        ss -ltn 2>/dev/null | grep -q ":${PINGFED_ADMIN_PORT} " || break
-        sleep 2; ((i++))
+    while pgrep -f 'org.pingidentity.RunPF' >/dev/null 2>&1; do
+        if [[ $i -ge 30 ]]; then
+            warning "PingFederate did not stop gracefully — sending SIGKILL"
+            pkill -9 -f 'org.pingidentity.RunPF' 2>/dev/null || true
+            sleep 2; break
+        fi
+        sleep 2; i=$((i+1))
     done
+    # Belt and braces: wait for the admin port to release as well.
+    i=0
+    while ss -ltn 2>/dev/null | grep -q ":${PINGFED_ADMIN_PORT} "; do
+        [[ $i -ge 15 ]] && break
+        sleep 2; i=$((i+1))
+    done
+    # Clear the stale pidfile so run.sh's own "already running" guard is clean.
+    : > "$PF_PID_FILE" 2>/dev/null || true
 
     info "Starting PingFederate..."
     mkdir -p "$LOG_DIR"
@@ -161,7 +175,7 @@ function restart_pingfed() {
         code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
                "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app" 2>/dev/null || echo 000)
         [[ "$code" =~ ^(200|302|401)$ ]] && { success "PingFederate admin console back up"; return 0; }
-        sleep 5; ((i++))
+        sleep 5; ((i++)) || true
     done
     error "PingFederate admin console did not return after restart (see $PF_RUN_LOG)"; return 1
 }
@@ -261,7 +275,13 @@ function ensure_pd_datastore() {
 }
 JSON
 )
-    local body; body=$(pf_request GET "/dataStores/${PINGFED_PD_DATASTORE_ID}")
+    # Redirect to a file (not $( )) so pf_request runs in THIS shell and its
+    # _PING_HTTP_CODE is accurate — a command substitution here would leave a
+    # stale 200 from the prior call and send a not-found datastore down the
+    # "merge existing" path, PUTting an error body with no type discriminator.
+    local body gtmp; gtmp=$(mktemp)
+    pf_request GET "/dataStores/${PINGFED_PD_DATASTORE_ID}" > "$gtmp" 2>/dev/null
+    body=$(cat "$gtmp"); rm -f "$gtmp"
     if [[ "$_PING_HTTP_CODE" != "200" ]]; then
         pf_ensure "/dataStores/${PINGFED_PD_DATASTORE_ID}" POST "/dataStores" "$ds_payload" \
             "LDAP datastore -> PingDirectory (bind ${LDAP_BIND_DN})"

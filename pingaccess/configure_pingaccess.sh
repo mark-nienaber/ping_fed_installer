@@ -35,7 +35,7 @@ function wait_pa_up() {
         code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
                -H 'X-XSRF-Header: PingAccess' "${PINGACCESS_ADMIN_API}/version" 2>/dev/null || echo 000)
         [[ "$code" =~ ^(200|401|403)$ ]] && { success "PingAccess admin API responding"; return 0; }
-        sleep 3; ((i++))
+        sleep 3; ((i++)) || true
     done
     error "PingAccess admin API not responding"; return 1
 }
@@ -120,13 +120,29 @@ function configure_pa_api() {
     # 1. PingFederate as the token provider (OIDC issuer). Trust group 2 = "Trust
     #    Any" so PA trusts PF's self-signed runtime cert in this dev topology
     #    (replace with a real trusted cert group for production).
+    # PingAccess validates this issuer now by fetching its OIDC discovery, so it
+    # must be reachable. In HA the console node serves no runtime, so point at the
+    # live engine node; Phase 3 (rewire_frontdoor) re-points this to the load
+    # balancer issuer once the front door is up.
+    local pf_issuer="$PINGFED_BASE_URL"
+    if [[ "${PINGFED_COUNT:-1}" -gt 1 ]]; then
+        pf_issuer="https://${PINGFED_HOSTNAME}:${PINGFED2_ENGINE_PORT}"
+    fi
     pa_request PUT /pingfederate/runtime "$(cat <<JSON
-{ "issuer": "${PINGFED_BASE_URL}", "trustedCertificateGroupId": 2,
+{ "issuer": "${pf_issuer}", "trustedCertificateGroupId": 2,
   "useProxy": false, "useSlo": false, "skipHostnameVerification": true }
 JSON
 )" >/dev/null 2>&1
+    # Setting the token provider can make PA reload and reset the connection, so a
+    # transient non-200 is possible even when the value was applied; confirm by GET.
+    if [[ "$_PING_HTTP_CODE" != "200" ]]; then
+        sleep 2
+        local got; got=$(pa_request GET /pingfederate/runtime 2>/dev/null \
+            | python3 -c "import sys,json;print(json.load(sys.stdin).get('issuer',''))" 2>/dev/null || true)
+        [[ "$got" == "$pf_issuer" ]] && _PING_HTTP_CODE=200
+    fi
     if [[ "$_PING_HTTP_CODE" == "200" ]]; then
-        success "  PingFederate set as token provider (issuer ${PINGFED_BASE_URL})"
+        success "  PingFederate set as token provider (issuer ${pf_issuer})"
     else
         error "  Failed to set PF runtime (HTTP $_PING_HTTP_CODE)"; return 1
     fi

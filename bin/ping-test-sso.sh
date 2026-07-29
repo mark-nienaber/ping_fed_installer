@@ -22,8 +22,15 @@ source "${SCRIPT_ROOT}/pingconfig.env"
 
 USER_NAME="${1:-testuser1}"
 USER_PASS="${2:-$DEFAULT_PASSWORD}"
-APP="https://${SAMPLE_APP_VIRTUAL_HOST}:${PINGACCESS_ENGINE_PORT}/"
-PF_ENGINE="${PINGFED_BASE_URL}"
+# In LB mode the app and PingFederate are reached through the HAProxy front door
+# on :443, not the raw PA engine / PF engine ports (PA returns 403 off-vhost).
+if [[ "${LB_ENABLED:-false}" == "true" ]]; then
+    APP="https://${SAMPLE_APP_VIRTUAL_HOST}:${LB_HTTPS_PORT}/"
+    PF_ENGINE="https://${PINGFED_HOSTNAME}:${LB_HTTPS_PORT}"
+else
+    APP="https://${SAMPLE_APP_VIRTUAL_HOST}:${PINGACCESS_ENGINE_PORT}/"
+    PF_ENGINE="${PINGFED_BASE_URL}"
+fi
 
 CJ=$(mktemp); LP=$(mktemp); BODY=$(mktemp)
 cleanup() { rm -f "$CJ" "$LP" "$BODY"; }

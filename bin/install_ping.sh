@@ -20,6 +20,7 @@ set -euo pipefail
 #     --phase1    Install only
 #     --phase2    Configure only
 #     --phase3    Integrate / sample content only
+#     --reinstall Wipe every installed product + state, then rebuild from scratch
 #     --force     Ignore .install-state and re-run completed phases
 #     --help      Show this help
 #
@@ -27,9 +28,9 @@ set -euo pipefail
 #   unless --force is given. This also supports external orchestration (a UI or
 #   remote runner) polling the state file between phases.
 #
-#   NOTE: product install/configure functions are STUBS in this scaffold — they
-#   log intent and return success so the full phase machinery is testable before
-#   the product logic lands. Real logic replaces the bodies marked [STUB].
+#   --reinstall is the one-command recovery path: it stops the stack, removes the
+#   product directories and .install-state, then runs all three phases fresh. Use
+#   it when an install is corrupted or partial and you want a clean rebuild.
 ################################################################################
 
 # Load central configuration
@@ -59,6 +60,7 @@ _RUN_PHASE1=false
 _RUN_PHASE2=false
 _RUN_PHASE3=false
 _FORCE=false
+_REINSTALL=false
 
 # -----------------------------------------------------------------------------
 # Logging setup
@@ -88,13 +90,14 @@ function phase_is_done() {
 function _usage() {
     cat <<EOF
 
-Usage: $0 <--all|--phase1|--phase2|--phase3> [--force]
+Usage: $0 <--all|--phase1|--phase2|--phase3|--reinstall> [--force]
 
-  --all     Run all three phases (full install)
-  --phase1  Install:    unzip + baseline start (PD -> PF -> PA)
-  --phase2  Configure:  PD schema/data + PF datastore/adapters + PA sites/rules
-  --phase3  Integrate:  wire PA->PF->PD, sample app, test users
-  --force   Re-run even if a phase is already marked complete
+  --all       Run all three phases (full install)
+  --phase1    Install:    unzip + baseline start (PD -> PF -> PA)
+  --phase2    Configure:  PD schema/data + PF datastore/adapters + PA sites/rules
+  --phase3    Integrate:  wire PA->PF->PD, sample app, test users
+  --reinstall Wipe every installed product + state, then rebuild from scratch
+  --force     Re-run even if a phase is already marked complete
 EOF
 }
 
@@ -109,6 +112,7 @@ function parse_args() {
             --phase1) _RUN_PHASE1=true; has_phase=true ;;
             --phase2) _RUN_PHASE2=true; has_phase=true ;;
             --phase3) _RUN_PHASE3=true; has_phase=true ;;
+            --reinstall) _REINSTALL=true; _RUN_PHASE1=true; _RUN_PHASE2=true; _RUN_PHASE3=true; _FORCE=true; has_phase=true ;;
             --force)  _FORCE=true ;;
             --help|-h) _usage; exit 0 ;;
             *) echo; echo "Error: unknown argument '$arg'."; _usage; exit 1 ;;
@@ -242,8 +246,41 @@ function wait_for_service() {
 }
 
 # =============================================================================
-# Product install/configure functions  — [STUB] bodies for now
-# Each returns 0 and records rollback state so the phase machinery is testable.
+# Wipe — stop the whole stack and remove installed products + state
+# =============================================================================
+function wipe_all() {
+    banner "Reinstall — wiping the existing install"
+    warning "Removing all installed Ping products, their data, and install state."
+
+    # Best-effort graceful stop of whatever the current config knows about.
+    bash "${SCRIPT_DIR}/bin/ping-control.sh" stop all >/dev/null 2>&1 || true
+
+    # Belt and braces: stop both directory nodes and kill any PF/PA/app stragglers
+    # regardless of the current counts, so a switch from clustered to single-node
+    # still tears the old topology down completely.
+    for d in "$PINGDIR_DIR" "$PINGDIR2_DIR"; do
+        [[ -x "${d}/bin/stop-server" ]] && "${d}/bin/stop-server" >/dev/null 2>&1 || true
+    done
+    pkill -f "${BASE_INSTALL_DIR}/pingfederate.*run.sh" 2>/dev/null || true
+    pkill -f "org.pingidentity.RunPF"                   2>/dev/null || true
+    pkill -f "${BASE_INSTALL_DIR}/pingaccess.*run.sh"   2>/dev/null || true
+    pkill -f "com.pingidentity.pa.cli.Starter"          2>/dev/null || true
+    pkill -f "pingaccess/sample-app.py"                 2>/dev/null || true
+    sudo systemctl stop haproxy >/dev/null 2>&1 || true
+
+    sleep 3   # let the ports release before the rebuild reserves them
+
+    for d in "$PINGDIR_DIR" "$PINGDIR2_DIR" "$PINGFED_DIR" "$PINGFED2_DIR" "$PINGACCESS_DIR"; do
+        [[ -n "$d" && -d "$d" ]] && { info "Removing $d"; rm -rf "$d" 2>/dev/null || sudo rm -rf "$d"; }
+    done
+
+    rm -f "$INSTALL_STATE_FILE" "$SCRIPT_STATE_FILE"
+    success "Wipe complete — rebuilding from scratch"
+}
+
+# =============================================================================
+# Product install / configure / rollback functions.
+# Each delegates to the matching per-product script and records rollback state.
 # =============================================================================
 
 # ---- PingDirectory ----------------------------------------------------------
@@ -269,7 +306,7 @@ function configure_pingdir() {
     fi
 }
 function rollback_pingdir() {
-    warning "[STUB] Rollback PingDirectory"
+    info "Rollback PingDirectory (stop-server + remove install dir)"
     [[ -x "${PINGDIR_DIR}/bin/stop-server" ]] && "${PINGDIR_DIR}/bin/stop-server" 2>/dev/null || true
     rm -rf "${PINGDIR_DIR}" 2>/dev/null || true
 }
@@ -305,7 +342,7 @@ function configure_pingfed() {
     fi
 }
 function rollback_pingfed() {
-    warning "[STUB] Rollback PingFederate"
+    info "Rollback PingFederate (kill run.sh + remove install dir)"
     pkill -f "run.properties.*pingfederate|org.tanukisoftware.*pingfederate" 2>/dev/null || true
     rm -rf "${PINGFED_DIR}" 2>/dev/null || true
 }
@@ -329,7 +366,7 @@ function configure_pingaccess() {
     fi
 }
 function rollback_pingaccess() {
-    warning "[STUB] Rollback PingAccess"
+    info "Rollback PingAccess (kill run.sh + remove install dir)"
     pkill -f "run.properties.*pingaccess|com.pingidentity.pa" 2>/dev/null || true
     rm -rf "${PINGACCESS_DIR}" 2>/dev/null || true
 }
@@ -365,7 +402,7 @@ function deploy_sample_app() {
     local i=0
     while [[ $i -lt 15 ]]; do
         curl -s -o /dev/null --max-time 3 "http://localhost:${port}/" 2>/dev/null && { success "Sample app serving on :${port}"; return 0; }
-        sleep 1; ((i++))
+        sleep 1; ((i++)) || true
     done
     warning "Sample app did not respond on :${port} (see ${LOG_DIR}/sample-app.log)"
 }
@@ -489,8 +526,18 @@ setup_logging
 
 banner "Ping Installer (PingDirectory + PingFederate + PingAccess)"
 info "Started at $(date)"
-info "Phases:  Phase1=${_RUN_PHASE1} Phase2=${_RUN_PHASE2} Phase3=${_RUN_PHASE3}  Force=${_FORCE}"
+info "Phases:  Phase1=${_RUN_PHASE1} Phase2=${_RUN_PHASE2} Phase3=${_RUN_PHASE3}  Force=${_FORCE}  Reinstall=${_REINSTALL}"
 info "Counts:  PD=${PINGDIR_COUNT} PF=${PINGFED_COUNT}  (PingAccess: single instance)"
+
+# Reinstall wipes first. Prompt only on an interactive terminal; a non-interactive
+# run (CI, remote runner) proceeds so recovery stays a single command.
+if [[ "$_REINSTALL" == "true" ]]; then
+    if [[ -t 0 ]]; then
+        read -r -p "Reinstall DELETES all products, data, and state. Type YES to continue: " _ans
+        [[ "$_ans" == "YES" ]] || { info "Reinstall aborted."; exit 0; }
+    fi
+    wipe_all
+fi
 
 preflight_checks
 

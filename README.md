@@ -126,7 +126,37 @@ create), so any phase is safe to run again.
 
 ![The three installer phases as a pipeline: Phase 1 install, Phase 2 configure, Phase 3 integrate, with a card per product summarising what Phase 2 configures and a note on dependency order](docs/images/install-phases.png)
 
-### Quick start
+### Step 1: create the install user
+
+The whole stack installs and runs under one OS user that has sudo. On the target
+host, create that user, give it sudo, log in as it, and set it in the config
+before anything else. Every step after this runs as this user.
+
+1. As root or an existing sudoer, create the user and grant it passwordless sudo:
+
+   ```bash
+   sudo useradd -m -s /bin/bash ping
+   sudo usermod -aG wheel ping                 # use 'sudo' instead of 'wheel' on Debian/Ubuntu
+   echo 'ping ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/ping
+   sudo chmod 440 /etc/sudoers.d/ping
+   ```
+
+2. Log in as that user, and stay as this user from here on:
+
+   ```bash
+   sudo -iu ping
+   ```
+
+3. Put the installer where this user can read it, and set the user in the config:
+
+   ```bash
+   cd /path/to/ping_fed_installer
+   sed -i 's/^INSTALL_USER=.*/INSTALL_USER="ping"/' pingconfig.env
+   ```
+
+### Step 2: quick start
+
+Run every command below as the `ping` user from Step 1.
 
 ```bash
 # 1. Stage the product zips and licenses under software/ (already present):
@@ -134,21 +164,15 @@ create), so any phase is safe to run again.
 #      software/pf/pingfederate-*.zip   + *.lic
 #      software/pa/pingaccess-*.zip     + *.lic
 
-# 2. Set the install user, hostnames and passwords in pingconfig.env
+# 2. Set the hostnames and passwords in pingconfig.env (INSTALL_USER is already set)
 vi pingconfig.env
 
-# 3. Prerequisites (run as a sudoer). Installs OpenJDK 21, creates the install
-#    user with passwordless sudo, the /ping directories owned by it, /etc/hosts
-#    entries, OS limits, and opens the firewall ports.
+# 3. Prerequisites: OpenJDK 21, the /ping directories, /etc/hosts, OS limits, firewall ports
 ./bin/ping-setup.sh
 
-# 4. As the install user, install the whole stack
+# 4. Install the whole stack
 ./bin/install_ping.sh --all
 ```
-
-Run the install as the `INSTALL_USER` set in `pingconfig.env`. `ping-setup.sh`
-creates that user and the products run under it. If it is not your current login,
-switch to it first with `sudo -iu <install-user>` and run step 4 from there.
 
 ### Reinstall from scratch
 

@@ -92,7 +92,7 @@ n=$("${PINGDIR_DIR}/bin/ldapsearch" --port "$PINGDIR_LDAP_PORT" --bindDN "$PINGD
       --searchScope sub "(pf-authn-session-group-id=*)" dn 2>/dev/null | grep -c '^dn:' || echo 0)
 [[ "${n:-0}" -ge 1 ]] \
     && success "     ${n} authentication session(s) stored under ${PINGFED_SESSIONS_BASE_DN}" \
-    || warning "     no session rows found in ${PINGFED_SESSIONS_BASE_DN} (is PINGFED_SESSION_STORAGE=pingdirectory + sessions enabled?)"
+    || warning "     no session rows found in ${PINGFED_SESSIONS_BASE_DN}"
 
 printf '\n'
 success "SSO END-TO-END TEST PASSED for ${USER_NAME}"

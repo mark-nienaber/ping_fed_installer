@@ -39,8 +39,6 @@ protected app is redirected to PingFederate, which authenticates against
 PingDirectory and persists the resulting session and OAuth grants back into
 PingDirectory instead of holding them in memory.
 
-![The integrated stack the installer builds: a browser reaches PingAccess, is redirected to PingFederate, which authenticates against PingDirectory and persists the SSO session and OAuth grants back into the directory](docs/images/arch-overview.png)
-
 ### The topology
 
 ![One topology behind the load balancer: HAProxy on :443 routes app.example.com to PingAccess and ping.example.com to PingFederate; PingAccess reaches PingFederate through the load balancer; PingFederate reaches PingDirectory directly over LDAPS; the second PingFederate and PingDirectory node is dashed and added by HA=true](docs/images/topology.png)
@@ -92,8 +90,8 @@ identical ports.
 
 Sessions held in memory are lost on every PingFederate restart and cannot be shared
 across engine nodes. Externalizing them to PingDirectory makes sessions durable and
-ready for clustering, which is the standard production pattern. Toggle it with
-`PINGFED_SESSION_STORAGE` in `pingconfig.env` (`pingdirectory` or `memory`).
+ready for clustering, which is the standard production pattern, so the installer
+always does it.
 
 ![Memory versus PingDirectory session storage: memory is lost on restart and cannot be shared across engines; the directory makes sessions durable, shared and indexed](docs/images/externalized-storage.png)
 
@@ -131,24 +129,26 @@ create), so any phase is safe to run again.
 ### Quick start
 
 ```bash
-# 1. Drop product zips and licenses into software/ (already present):
+# 1. Stage the product zips and licenses under software/ (already present):
 #      software/pd/PingDirectory-*.zip + *.lic
 #      software/pf/pingfederate-*.zip   + *.lic
 #      software/pa/pingaccess-*.zip     + *.lic
 
-# 2. Review and edit configuration (hosts, ports, passwords, storage mode)
+# 2. Set the install user, hostnames and passwords in pingconfig.env
 vi pingconfig.env
 
-# 3. Prepare the host (JDK 21, install user, directories, /etc/hosts, limits)
+# 3. Prerequisites (run as a sudoer). Installs OpenJDK 21, creates the install
+#    user with passwordless sudo, the /ping directories owned by it, /etc/hosts
+#    entries, OS limits, and opens the firewall ports.
 ./bin/ping-setup.sh
 
-# 4. Install everything
+# 4. As the install user, install the whole stack
 ./bin/install_ping.sh --all
-
-# ...or one phase at a time
-./bin/install_ping.sh --phase1
-./bin/install_ping.sh --phase2 --force
 ```
+
+Run the install as the `INSTALL_USER` set in `pingconfig.env`. `ping-setup.sh`
+creates that user and the products run under it. If it is not your current login,
+switch to it first with `sudo -iu <install-user>` and run step 4 from there.
 
 ### Reinstall from scratch
 
@@ -320,12 +320,11 @@ ping_fed_installer/
 | `BASE_INSTALL_DIR` | where all three products install (default `/ping`) |
 | `PING_HOSTNAME` | host that all services bind and advertise on a single node |
 | `DEFAULT_PASSWORD` | shared admin and service password. Change it before production |
-| `PINGFED_SESSION_STORAGE` | `pingdirectory` (externalized) or `memory` (dev) |
 | `PINGFED_SESSIONS_BASE_DN` / `PINGFED_GRANTS_BASE_DN` | where PF writes sessions and grants in PD |
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | the least privilege service account PF binds to PD as |
 | `PINGFED_ADMIN_UID` | the LDAP user PF admins log in as (auth delegated to PD) |
 | `HA` | topology, the one knob: `false` (default) is a single node of each product behind the load balancer, `true` is a two node replicated and clustered tier. The instance counts are derived from it (PingAccess is always single instance) |
-| `INSTALL_SAMPLE_APP` / `INSTALL_TEST_USERS` / `INSTALL_OIDC_CLIENT` | optional Phase 3 content |
+| `INSTALL_SAMPLE_APP` / `INSTALL_TEST_USERS` | optional Phase 3 content (sample app, test users) |
 
 Ports: PD LDAP 1389, LDAPS 1636 (the admin connector rides here), HTTPS 1443
 (Admin API and SCIM), replication 8989 (only when `HA=true`). PF admin

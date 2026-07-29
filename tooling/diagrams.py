@@ -15,56 +15,6 @@ from svgkit import *  # noqa
 PA_FILL, PA_LINE = PRX_FILL, PRX_LINE   # PingAccess reuses the gateway/orange role
 
 
-# ============================================================ 1. architecture
-def arch_overview(OUT):
-    W, H = 1040, 800
-    s = SVG(W, H, "Integrated Ping stack the installer builds")
-    cx = W / 2
-    s.header("The stack the installer builds",
-             "One host, three products, wired the way a customer runs them — sessions and grants kept in the directory")
-
-    bw = 440
-    bx = cx - bw / 2
-    s.node(cx - 110, 74, 220, 44, "Browser", fill=USER_FILL, stroke=USER_LINE, size=13)
-
-    # PingAccess
-    s.node(bx, 156, bw, 66, "PingAccess", sub="enforcement point  ·  vhost app.example.com",
-           fill=PA_FILL, stroke=PA_LINE, size=14, subsize=10.5, badge="9000 / 3000")
-    # PingFederate
-    s.node(bx, 288, bw, 66, "PingFederate", sub="OAuth 2.0 / OIDC token service  ·  IdP adapter",
-           fill=PF_FILL, stroke=PF_LINE, size=14, subsize=10.5, badge="9999 / 9031")
-
-    # PingDirectory container with its DIT
-    dy = 420
-    s.container(bx - 6, dy, bw + 12, 250, "PINGDIRECTORY — DATA + SESSION STORE",
-                fill=SITE_FILL, stroke=PD_LINE, dash=None)
-    ou = [("ou=people", "end users"), ("ou=applications", "cn=pingfederate service acct"),
-          ("ou=AuthenticationSessions", "PF SSO sessions"), ("ou=AccessGrant", "PF OAuth grants")]
-    oy = dy + 40
-    for i, (dn, note) in enumerate(ou):
-        yy = oy + i * 50
-        s.rect(bx + 18, yy, bw - 36, 40, "#ffffff", PD_LINE, r=6, sw=1.3)
-        s.text(bx + 34, yy + 24, dn, size=12, weight="700", anchor="start", family=MONO)
-        s.text(bx + bw - 34, yy + 24, note, size=10.5, fill=MUTED, anchor="end")
-    s.caption(cx, dy + 250 + 18, "LDAP 1389  ·  LDAPS 1636 (+ admin connector)  ·  HTTPS 1443 (Admin API / SCIM)")
-
-    # edges — each line ends exactly ON its target box's top border, so the
-    # arrowhead tip (which sits at the line's end) lands on the box line.
-    s.line(cx, 118, cx, 156, sw=1.8)
-    s.edge_label(cx, 138, "1 · GET protected app")
-    s.line(cx, 222, cx, 288, sw=1.8)
-    s.edge_label(cx, 255, "2 · no session → OIDC redirect")
-    # PF -> PD: two labelled arrows landing on the directory container border
-    s.path(f"M {cx-70} 354 L {cx-70} {dy}", sw=1.6)
-    s.edge_label(cx - 70, 388, "3 · bind + search")
-    s.path(f"M {cx+70} 354 L {cx+70} {dy}", sw=1.6)
-    s.edge_label(cx + 70, 388, "4 · persist session + grants")
-
-    s.callout(bx, 710, bw, "In-memory sessions die on every restart and cannot be shared "
-              "across engines. Writing them to PingDirectory makes SSO durable and cluster-ready.",
-              title="Why sessions live in the directory", kind="note")
-    return [s.save(OUT / "arch-overview.svg")]
-
 
 # ============================================================ 2. install phases
 def install_phases(OUT):
@@ -260,6 +210,6 @@ def operator_tooling(OUT):
 
 
 def build(OUT):
-    fns = (arch_overview, install_phases, sso_flow, platform_topology,
+    fns = (install_phases, sso_flow, platform_topology,
            externalized_storage, operator_tooling)
     return [p for fn in fns for p in fn(OUT)]

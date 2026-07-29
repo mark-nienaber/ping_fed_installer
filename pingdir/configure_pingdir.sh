@@ -200,10 +200,6 @@ LDIF
 # store in prod). Idempotent via list-local-db-indexes.
 # -----------------------------------------------------------------------------
 function create_grant_indexes() {
-    if [[ "${PINGFED_SESSION_STORAGE:-memory}" != "pingdirectory" ]]; then
-        info "PINGFED_SESSION_STORAGE=${PINGFED_SESSION_STORAGE:-memory} — grants not externalized, skipping indexes"
-        return 0
-    fi
     info "Creating PingDirectory indexes for externalized OAuth grant attributes..."
 
     # attribute:index-type — PF 13.1 recommended set

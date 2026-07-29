@@ -329,11 +329,6 @@ json.dump(d, sys.stdout)
 # Idempotent: re-running detects the managers are already active and no-ops.
 # -----------------------------------------------------------------------------
 function activate_externalized_storage() {
-    if [[ "${PINGFED_SESSION_STORAGE:-memory}" != "pingdirectory" ]]; then
-        info "PINGFED_SESSION_STORAGE=${PINGFED_SESSION_STORAGE:-memory} — leaving grant/session storage in memory"
-        return 0
-    fi
-
     local grant_xml="${PF_DATA_CS}/${PF_GRANT_MGR}.xml"
     local sess_xml="${PF_DATA_CS}/${PF_SESSION_MGR}.xml"
     for f in "$grant_xml" "$sess_xml" "$PF_SERVICE_POINTS"; do

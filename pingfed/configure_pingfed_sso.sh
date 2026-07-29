@@ -162,12 +162,10 @@ JSON
 #    session-storage manager to actually write sessions to PingDirectory — the
 #    global policy ships disabled (enableSessions=false), so without this the
 #    externalized session store stays empty even though the manager is active.
-if [[ "${PINGFED_SESSION_STORAGE:-memory}" == "pingdirectory" ]]; then
-    pf_request PUT "/session/authenticationSessionPolicies/global" \
-      '{"enableSessions": true, "persistentSessions": true, "hashUniqueUserKeyAttribute": false, "idleTimeoutMins": 60, "maxTimeoutMins": 480}' >/dev/null 2>&1
-    [[ "$_PING_HTTP_CODE" == "200" ]] \
-        && success "  Authentication sessions enabled + persisted to PingDirectory" \
-        || warning "  Auth-session policy PUT -> HTTP $_PING_HTTP_CODE"
-fi
+pf_request PUT "/session/authenticationSessionPolicies/global" \
+  '{"enableSessions": true, "persistentSessions": true, "hashUniqueUserKeyAttribute": false, "idleTimeoutMins": 60, "maxTimeoutMins": 480}' >/dev/null 2>&1
+[[ "$_PING_HTTP_CODE" == "200" ]] \
+    && success "  Authentication sessions enabled + persisted to PingDirectory" \
+    || warning "  Auth-session policy PUT -> HTTP $_PING_HTTP_CODE"
 
 success "PingFederate OAuth/OIDC + SSO configuration complete"

@@ -100,6 +100,10 @@ always does it.
 This is what the installer proves. A browser reaches the protected app, is bounced
 through PingFederate to sign in against PingDirectory, and lands back on the app
 carrying an injected identity header, with the SSO session written to the directory.
+PingFederate reaches the directory twice along the way: once to validate the
+credentials at login, and again at token issuance to read the attributes that become
+the token claims. Authentication and attribute retrieval are logically separate
+sources; here they are the same directory.
 
 ![Sequence of a full single sign-on: the browser, PingAccess, PingFederate and PingDirectory exchanging redirects and tokens until the app returns X-USER: testuser1](docs/images/sso-flow.png)
 

@@ -48,7 +48,7 @@ def install_phases(OUT):
 
 # ============================================================ 3. SSO sequence
 def sso_flow(OUT):
-    W, H = 1120, 700
+    W, H = 1120, 820
     s = SVG(W, H, "End-to-end SSO the installer proves")
     s.header("One login, end to end",
              "What the installer proves: a browser reaches the protected app and comes back with an injected identity")
@@ -59,23 +59,28 @@ def sso_flow(OUT):
                  ("PingFederate", PF_FILL, PF_LINE),
                  ("PingDirectory", PD_FILL, PD_LINE)],
                 [(0, 1, "GET https://app.example.com/"),
-                 (1, 0, "302 → PingFederate (no session)", "dashed"),
+                 (1, 0, "302 to PingFederate (no session)", "dashed"),
                  (0, 2, "follow redirect to /as/authorization.oauth2"),
                  (2, 0, "HTML login form", "dashed"),
                  (0, 2, "POST testuser1 / password"),
-                 (2, 3, "bind + search as service account"),
-                 (3, 2, "user found; write SSO session", "dashed"),
+                 (2, 3, "authenticate: validate credentials (bind + search)"),
+                 (3, 2, "user verified; write SSO session", "dashed"),
                  (2, 0, "302 back to app with ?code="),
                  (0, 1, "deliver code to /pa/oidc/cb"),
                  (1, 2, "exchange code for tokens"),
-                 (1, 0, "200 — app shows X-USER: testuser1", "dashed")],
+                 (2, 3, "read attributes for the token claims"),
+                 (3, 2, "attributes returned", "dashed"),
+                 (2, 1, "id + access tokens", "dashed"),
+                 (1, 0, "200, app shows X-USER: testuser1", "dashed")],
                 step_gap=38)
 
     s.callout(40, y + 16, W - 80,
-              "The SSO session written at step 7 lands in ou=AuthenticationSessions in "
-              "PingDirectory — durable across restarts, and in clustered mode present on both "
-              "replicated nodes. The X-USER header is proof the whole chain fired.",
-              title="Proof it worked", kind="ok")
+              "PingFederate reaches PingDirectory twice: once to validate the credentials at "
+              "login, and again at token issuance to read the attributes that become token claims. "
+              "Authentication and attribute retrieval are logically separate sources; here they are "
+              "the same directory. The SSO session written mid-flow lands in ou=AuthenticationSessions, "
+              "durable across restarts and present on both nodes when clustered.",
+              title="Two hits, one directory: authenticate, then read attributes", kind="ok")
     return [s.save(OUT / "sso-flow.svg")]
 
 

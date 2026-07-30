@@ -1,5 +1,8 @@
-# Product software + licenses (user-supplied, never commit)
-software/
+# Product archives and licences are user-supplied and never committed. The
+# software/pd, software/pf and software/pa folders stay in the repo (empty) so
+# it is clear where the zips and .lic files go.
+software/*/*
+!software/*/.gitkeep
 *.zip
 *.lic
 
@@ -10,9 +13,9 @@ software/
 logs/
 
 # Claude local config
-.claude/settings.local.json
+.claude/
 
-# Python bytecode from the diagram tooling
+# Python bytecode
 __pycache__/
 *.pyc
 

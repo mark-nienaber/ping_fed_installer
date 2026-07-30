@@ -196,7 +196,7 @@ you are ready.
 
 ### Operate
 
-![The operator toolbox: one card per script (setup, orchestrator, control, validate, monitor, web dashboard, logs, SSO test), each aware of the instance counts and the load balancer setting](docs/images/operator-tooling.png)
+![The operator toolbox: one card per script (setup, orchestrator, control, validate, monitor, web dashboard, logs, SSO test), each reading the HA flag to manage exactly the components the configuration declares](docs/images/operator-tooling.png)
 
 ```bash
 # Lifecycle for the whole system (both PD nodes, PF console and engine, PA, sample
@@ -329,15 +329,10 @@ ping_fed_installer/
 │   ├── pingaccess.sh              # Phase 1 install (extract, license, start)
 │   ├── configure_pingaccess.sh    # Phase 2: SLA and password rotate, PF token provider, vhost, site, app
 │   └── sample-app.py              # stdlib backend that echoes injected identity headers
-├── docs/images/            # README diagrams (generated PNG and SVG source)
-├── tooling/                # diagram generator: svgkit.py, diagrams.py, make_diagrams.py
-└── software/               # product zips and licenses (gitignored, user supplied)
+├── docs/images/            # README diagrams (PNG)
+└── software/               # product zips and licenses go here (gitignored, user supplied)
     ├── pd/   pf/   pa/
 ```
-
-> Diagrams are generated, not hand drawn. `python3 tooling/make_diagrams.py` writes
-> the SVG sources and renders the PNGs the README embeds (it needs `rsvg-convert`
-> from librsvg). Edit `tooling/diagrams.py`, never the SVGs.
 
 ---
 

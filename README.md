@@ -121,6 +121,41 @@ Details the installer bakes in to match a real customer:
 
 ---
 
+## Prerequisites
+
+Tested on CentOS Stream 9 and Ubuntu 24.04 LTS (both aarch64) with 10 GB RAM,
+which is enough for either mode. `bin/ping-setup.sh` provisions the rest: the
+JDK, the `/ping` directories, `/etc/hosts`, the OS limits PingDirectory needs,
+and the firewall ports. It detects the package manager, so the same command
+works on both families (`dnf`/`yum` on RHEL, `apt-get` on Debian/Ubuntu).
+
+| Requirement | Value |
+|---|---|
+| Operating system | CentOS Stream 9 / RHEL 9, or Ubuntu 24.04 LTS (aarch64) |
+| Java | OpenJDK 21 (installed by `bin/ping-setup.sh`) |
+| Memory | 10 GB RAM |
+| Free disk | 10 GB under `/ping` |
+
+`bin/ping-setup.sh` is not optional — it creates `/ping`, which the install
+writes into. Skipping it fails Phase 1 with
+`mkdir: cannot create directory '/ping': Permission denied`.
+
+> **Ubuntu note — firewall.** The firewall step only knows how to open ports
+> with `firewall-cmd`, so on a host without firewalld it logs
+> `firewalld not active — skipping` and opens nothing. That is fine when
+> nothing is filtering, but if `ufw` is enabled you must open the ports
+> yourself:
+>
+> ```bash
+> # PD 1389/1636/1443, PF 9999/9031, PA 9000/3000/3030, LB 443, dashboard 8600
+> sudo ufw allow 1389,1636,1443,9999,9031,9000,3000,3030,443,8600/tcp
+> ```
+>
+> Inter-node ports (PD replication 8989/8990, PF JGroups 7600-7702) stay
+> closed either way — they only need localhost here.
+
+---
+
 ## Install flow
 
 Everything is driven by `pingconfig.env` and runs in three phases that can be

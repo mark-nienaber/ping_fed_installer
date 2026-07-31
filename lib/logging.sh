@@ -202,7 +202,9 @@ _STEP_NAME=""
 step_init() {
     _TOTAL_STEPS="${1:-0}"
     _CURRENT_STEP=0
-    _INSTALL_START_TIME=$(date +%s)
+    # Deliberately does NOT touch _INSTALL_START_TIME. Every phase calls
+    # step_init, so resetting it here made "Total time" measure only the last
+    # phase — a three minute install reported as a few seconds.
 }
 
 step_begin() {
@@ -319,6 +321,11 @@ summary_print() {
     done
 
     printf '\n  %s%d of %d components installed successfully%s\n' "$_C_BOLD" "$ok_count" "$total_count" "$_C_RESET"
+
+    # Published so callers can gate their exit status on the real result.
+    _SUMMARY_OK_COUNT=$ok_count
+    _SUMMARY_TOTAL_COUNT=$total_count
+    [[ $ok_count -eq $total_count ]]
 }
 
 # Print access URLs in a clean aligned format

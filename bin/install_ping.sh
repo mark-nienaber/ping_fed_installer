@@ -84,6 +84,28 @@ function phase_is_done() {
     [[ -f "$INSTALL_STATE_FILE" ]] && grep -q "^${phase}:" "$INSTALL_STATE_FILE"
 }
 
+# .install-state records completed phases, but it is only a claim. If the file
+# travels with the repo (copied/rsynced/extracted from an archive rather than
+# cloned — it is gitignored, so a clean clone never carries one) it describes a
+# DIFFERENT host, and every phase self-skips against an empty $BASE_INSTALL_DIR.
+# The install then does nothing and still reports success. Corroborate the claim
+# against the product install markers before trusting it.
+function validate_install_state() {
+    [[ -f "$INSTALL_STATE_FILE" ]] || return 0
+    grep -q "^PHASE1:" "$INSTALL_STATE_FILE" 2>/dev/null || return 0
+
+    local missing=()
+    [[ -f "${PINGDIR_DIR}/.ping-setup-complete"      ]] || missing+=("PingDirectory")
+    [[ -f "${PINGFED_DIR}/.ping-install-complete"    ]] || missing+=("PingFederate")
+    [[ -f "${PINGACCESS_DIR}/.ping-install-complete" ]] || missing+=("PingAccess")
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+
+    warning "Stale ${INSTALL_STATE_FILE##*/}: claims Phase 1 complete, but these are not installed: ${missing[*]}"
+    warning "The state does not match this host — discarding it and installing from scratch."
+    mv -f "$INSTALL_STATE_FILE" "${INSTALL_STATE_FILE}.stale" 2>/dev/null || rm -f "$INSTALL_STATE_FILE"
+    info "Previous state kept at ${INSTALL_STATE_FILE##*/}.stale"
+}
+
 # -----------------------------------------------------------------------------
 # Usage / argument parsing
 # -----------------------------------------------------------------------------
@@ -494,25 +516,56 @@ function run_phase3() {
 
 # -----------------------------------------------------------------------------
 # Final status
+#
+# Every row is probed live. The summary used to pass a literal "ok" for each
+# component, so it printed "N of N components installed successfully" plus the
+# access URLs even when no phase had run and nothing was listening.
 # -----------------------------------------------------------------------------
+
+# Is something listening on this TCP port? Mirrors check_ports_availability.
+function _port_listening() {
+    local p=$1
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"
+    else
+        netstat -tuln 2>/dev/null | grep -q ":${p} "
+    fi
+}
+
+# 401 counts as healthy: the endpoint is up and demanding credentials.
+function _http_responding() {
+    local url=$1 code
+    code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
+    [[ "$code" =~ ^(200|302|401)$ ]]
+}
+
+function _result_port() { _port_listening "$1" && echo "ok" || echo "fail"; }
+function _result_http() { _http_responding "$1" && echo "ok" || echo "fail"; }
+
 function show_final_status() {
     summary_init
-    summary_add "PingDirectory" "LDAPS :${PINGDIR_LDAPS_PORT}" "ok"
-    [[ "${PINGDIR_COUNT:-1}" -gt 1 ]] && summary_add "PingDirectory-2" "LDAPS :${PINGDIR2_LDAPS_PORT} (replicated)" "ok"
+    summary_add "PingDirectory" "LDAPS :${PINGDIR_LDAPS_PORT}" "$(_result_port "$PINGDIR_LDAPS_PORT")"
+    [[ "${PINGDIR_COUNT:-1}" -gt 1 ]] && summary_add "PingDirectory-2" "LDAPS :${PINGDIR2_LDAPS_PORT} (replicated)" "$(_result_port "$PINGDIR2_LDAPS_PORT")"
     if [[ "${PINGFED_COUNT:-1}" -gt 1 ]]; then
-        summary_add "PingFederate-1" "CLUSTERED_CONSOLE admin :${PINGFED_ADMIN_PORT}" "ok"
-        summary_add "PingFederate-2" "CLUSTERED_ENGINE engine :${PINGFED2_ENGINE_PORT}" "ok"
+        summary_add "PingFederate-1" "CLUSTERED_CONSOLE admin :${PINGFED_ADMIN_PORT}" "$(_result_http "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app")"
+        summary_add "PingFederate-2" "CLUSTERED_ENGINE engine :${PINGFED2_ENGINE_PORT}" "$(_result_port "$PINGFED2_ENGINE_PORT")"
     else
-        summary_add "PingFederate"  "admin :${PINGFED_ADMIN_PORT} / engine :${PINGFED_ENGINE_PORT}" "ok"
+        summary_add "PingFederate"  "admin :${PINGFED_ADMIN_PORT} / engine :${PINGFED_ENGINE_PORT}" "$(_result_http "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app")"
     fi
-    summary_add "PingAccess"    "admin :${PINGACCESS_ADMIN_PORT} / engine :${PINGACCESS_ENGINE_PORT}" "ok"
-    [[ "${LB_ENABLED:-false}" == "true" ]] && summary_add "Load Balancer" "HAProxy :${LB_HTTPS_PORT} (TLS termination)" "ok"
-    summary_print
+    summary_add "PingAccess"    "admin :${PINGACCESS_ADMIN_PORT} / engine :${PINGACCESS_ENGINE_PORT}" "$(_result_http "https://${PINGACCESS_HOSTNAME}:${PINGACCESS_ADMIN_PORT}")"
+    [[ "${LB_ENABLED:-false}" == "true" ]] && summary_add "Load Balancer" "HAProxy :${LB_HTTPS_PORT} (TLS termination)" "$(_result_port "$LB_HTTPS_PORT")"
+    # The '||' branch keeps errexit and the ERR trap out of this — an unhealthy
+    # component is reported below, not treated as a crash in the reporting code.
+    local all_healthy=true
+    summary_print || all_healthy=false
+
     summary_urls \
         "PingFederate Admin" "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app" \
         "PingAccess Admin"   "https://${PINGACCESS_HOSTNAME}:${PINGACCESS_ADMIN_PORT}" \
         "PingDirectory Admin API" "https://${PINGDIR_HOSTNAME}:${PINGDIR_HTTPS_PORT}"
     info "Installation log: $LOG_FILE"
+
+    [[ "$all_healthy" == "true" ]]
 }
 
 # ========================
@@ -539,6 +592,12 @@ if [[ "$_REINSTALL" == "true" ]]; then
     wipe_all
 fi
 
+# Discard phase state that does not match what is actually on this host, so a
+# state file carried in from elsewhere cannot make every phase self-skip. Runs
+# before pre-flight because pre-flight's port reservation reads the same install
+# markers, and both must agree on what is really installed.
+validate_install_state
+
 preflight_checks
 
 [[ "$_RUN_PHASE1" == "true" ]] && run_phase1
@@ -546,5 +605,13 @@ preflight_checks
 [[ "$_RUN_PHASE3" == "true" ]] && run_phase3
 
 rm -f "$SCRIPT_STATE_FILE"
-show_final_status
-success "Ping installation completed successfully!"
+
+# The summary is the health check, so the exit status follows it: a component
+# that is not responding means a failed install, not a successful one.
+if show_final_status; then
+    success "Ping installation completed successfully!"
+else
+    error "Installation incomplete: ${_SUMMARY_OK_COUNT:-0} of ${_SUMMARY_TOTAL_COUNT:-0} components responding."
+    error "Check the log for the failing component: $LOG_FILE"
+    exit 1
+fi

@@ -8,6 +8,7 @@ software/*/*
 
 # Installation state + logs
 .install-state
+.install-state.stale
 /tmp/.ping_install_state
 *.log
 logs/

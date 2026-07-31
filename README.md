@@ -242,7 +242,7 @@ you are ready.
 ./bin/ping-control.sh status all
 
 ./bin/ping-control.sh start dash        # live web dashboard (auto refresh)
-                                        #   http://<server>:8600/  (topology, replication,
+                                        #   https://<server>:8600/  (topology, replication,
                                         #   cluster, PF to PD link, LB routing, per JVM memory)
 ./bin/ping-monitor.sh                   # the same data in the terminal
 ./bin/ping-monitor.sh --watch 5
@@ -250,6 +250,13 @@ you are ready.
 ./bin/ping-logs.sh -f pf                # tail product logs (-f follow, -e errors)
 ./bin/ping-test-sso.sh                  # drive the login flow from end to end
 ```
+
+The dashboard gives you the same live picture in the browser, refreshed
+automatically. Below, the second node of each tier is not running, so the monitor
+flags them red and marks replication and the cluster degraded, which is exactly
+what a live view is for:
+
+![Live monitoring dashboard for the Ping stack: a header reading 2 components down, status tiles for components up, replication backlog, cluster nodes and memory used, a topology and traffic path panel from the browser through the HAProxy load balancer to PingFederate and PingDirectory with the two stopped second nodes marked in red, a components panel listing each node with its ports and an up or down state, and PingDirectory replication and PingFederate cluster panels](docs/images/live-dashboard.png)
 
 > PingFederate takes a while to start (JVM and engine warm up). `ping-control.sh`
 > starts it detached with `setsid` and waits on the port, so a slow start does not

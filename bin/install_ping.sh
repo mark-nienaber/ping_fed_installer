@@ -583,6 +583,17 @@ function show_final_status() {
     _urls+=("PingFederate admin console" "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app")
     _urls+=("PingAccess admin console"   "https://${PINGACCESS_HOSTNAME}:${PINGACCESS_ADMIN_PORT}")
     _urls+=("PingDirectory admin API"    "https://${PINGDIR_HOSTNAME}:${PINGDIR_HTTPS_PORT}")
+    # The monitoring dashboard is an operator tool, not a product: no phase
+    # installs or starts it. Probe it rather than assert it, so the summary never
+    # advertises a URL that is not answering — and hand back the command when it
+    # is not. It stays out of the component table above for the same reason: a
+    # tool nobody started is not a failed install.
+    local _dash="https://${PING_HOSTNAME:-localhost}:${DASHBOARD_PORT:-8600}"
+    if _port_listening "${DASHBOARD_PORT:-8600}"; then
+        _urls+=("Monitoring dashboard" "$_dash")
+    else
+        _urls+=("Monitoring dashboard" "$_dash   — not running: ./bin/ping-control.sh start dash")
+    fi
     summary_urls "${_urls[@]}"
 
     local -a _creds=()

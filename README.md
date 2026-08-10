@@ -244,8 +244,13 @@ you are ready.
 ./bin/ping-control.sh start dash        # live web dashboard (auto refresh)
                                         #   https://<server>:8600/  (topology, replication,
                                         #   cluster, PF to PD link, LB routing, per JVM memory)
-./bin/ping-monitor.sh                   # the same data in the terminal
-./bin/ping-monitor.sh --watch 5
+./bin/ping-monitor.sh                   # the same data in the terminal, one pass
+./bin/ping-monitor.sh --watch 5         # stays up, refreshing every 5s
+./bin/ping-monitor.sh --watch 10 cluster replication
+                                        #   panels: components replication cluster
+                                        #           link lb resources
+./bin/ping-monitor.sh --tail sso        # follow one login across PA, PF and PD
+./bin/ping-monitor.sh --list            # panels and log sources
 ./bin/ping-validate.sh                  # health checks that adapt to the current mode
 ./bin/ping-logs.sh -f pf                # tail product logs (-f follow, -e errors)
 ./bin/ping-test-sso.sh                  # drive the login flow from end to end
@@ -308,6 +313,7 @@ phase self-skips and only the summary is produced.
 | PingFederate admin console | `https://ping.example.com:9999/pingfederate/app` | pfadmin | 2FederateM0re! |
 | PingAccess admin console | `https://ping.example.com:9000/` | administrator | 2FederateM0re! |
 | PingDirectory (LDAP) | `ldap://ping.example.com:1389` (node 1), `:2389` (node 2) | cn=Directory Manager | 2FederateM0re! |
+| Monitoring dashboard | `https://ping.example.com:8600` — no login; start it with `./bin/ping-control.sh start dash` | | |
 | OIDC discovery | `https://ping.example.com/.well-known/openid-configuration` | | |
 
 > PingFederate admins sign in as an LDAP user in PingDirectory. pfadmin is

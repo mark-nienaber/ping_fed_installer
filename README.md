@@ -296,6 +296,11 @@ the ports; to open them on their own run:
 The passwords below are the development `DEFAULT_PASSWORD` from `pingconfig.env`.
 Change them before production.
 
+The installer prints the same URLs and credentials when it finishes, so a
+completed run tells you where to go and how to sign in without coming back here.
+Re-running `./bin/install_ping.sh` on a finished install prints them again — every
+phase self-skips and only the summary is produced.
+
 | What | URL | Username | Password |
 |---|---|---|---|
 | Protected app, start here | `https://app.example.com/` | end user, below | |

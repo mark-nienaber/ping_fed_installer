@@ -328,14 +328,35 @@ summary_print() {
     [[ $ok_count -eq $total_count ]]
 }
 
-# Print access URLs in a clean aligned format
+# Print access URLs in a clean aligned format. Args come in pairs: <label> <url>
 summary_urls() {
     printf '\n  %sAccess Points:%s\n' "$_C_BOLD" "$_C_RESET"
     while [[ $# -ge 2 ]]; do
-        printf '    %-17s %s\n' "$1:" "$2"
+        printf '    %-28s %s\n' "$1" "$2"
         shift 2
     done
+}
 
+# Print sign-in credentials in an aligned table. Args come in triples:
+#   <account> <username> <password>
+#
+# A URL with no way in is only half an answer, so the installer prints both. The
+# passwords are the development defaults that already sit in cleartext in
+# pingconfig.env, so this exposes nothing the repository does not — but it does
+# put them in the install log, which is why the header says what they are.
+summary_credentials() {
+    printf '\n  %sCredentials:%s %s(development defaults from pingconfig.env — change before production)%s\n' \
+        "$_C_BOLD" "$_C_RESET" "$_C_DIM" "$_C_RESET"
+    printf '    %s%-28s %-22s %s%s\n' "$_C_DIM" "Account" "Username" "Password" "$_C_RESET"
+    while [[ $# -ge 3 ]]; do
+        printf '    %-28s %-22s %s\n' "$1" "$2" "$3"
+        shift 3
+    done
+}
+
+# Closing rule under the whole summary block. Was the tail of summary_urls, and
+# moved out when the credentials block started following the URLs.
+summary_end() {
     local width=70
     printf '\n%s%s%s\n' "$_C_BOLD" "$(_repeat_char "=" "$width")" "$_C_RESET"
 }

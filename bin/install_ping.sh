@@ -48,6 +48,7 @@ else
     banner()  { echo "== $* =="; }
     step_init() { :; } ; step_begin() { echo "-> $*"; } ; step_end() { :; }
     summary_init(){ :; } ; summary_add(){ echo "  $*"; } ; summary_print(){ :; } ; summary_urls(){ :; }
+    summary_credentials(){ :; } ; summary_end(){ :; }
 fi
 
 # Logging + state files
@@ -542,6 +543,20 @@ function _http_responding() {
 function _result_port() { _port_listening "$1" && echo "ok" || echo "fail"; }
 function _result_http() { _http_responding "$1" && echo "ok" || echo "fail"; }
 
+# Where an end user actually starts: the load-balancer front door when one is
+# enabled, otherwise straight at the PingAccess engine. Either way it has to be
+# the virtual host — PingAccess answers 403 to anything off-vhost. Mirrors the
+# same choice in bin/ping-test-sso.sh.
+function _sample_app_url() {
+    if [[ "${LB_ENABLED:-false}" == "true" ]]; then
+        [[ "${LB_HTTPS_PORT}" == "443" ]] \
+            && echo "https://${SAMPLE_APP_VIRTUAL_HOST}/" \
+            || echo "https://${SAMPLE_APP_VIRTUAL_HOST}:${LB_HTTPS_PORT}/"
+    else
+        echo "https://${SAMPLE_APP_VIRTUAL_HOST}:${PINGACCESS_ENGINE_PORT}/"
+    fi
+}
+
 function show_final_status() {
     summary_init
     summary_add "PingDirectory" "LDAPS :${PINGDIR_LDAPS_PORT}" "$(_result_port "$PINGDIR_LDAPS_PORT")"
@@ -559,10 +574,37 @@ function show_final_status() {
     local all_healthy=true
     summary_print || all_healthy=false
 
-    summary_urls \
-        "PingFederate Admin" "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app" \
-        "PingAccess Admin"   "https://${PINGACCESS_HOSTNAME}:${PINGACCESS_ADMIN_PORT}" \
-        "PingDirectory Admin API" "https://${PINGDIR_HOSTNAME}:${PINGDIR_HTTPS_PORT}"
+    # The protected app leads, because it is the only entry point an end user
+    # needs; the consoles follow. Both lists are built up so a topology without
+    # the sample app or without seeded users does not advertise either.
+    local -a _urls=()
+    [[ "${INSTALL_SAMPLE_APP:-true}" == "true" ]] && \
+        _urls+=("Protected app (start here)" "$(_sample_app_url)")
+    _urls+=("PingFederate admin console" "https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pingfederate/app")
+    _urls+=("PingAccess admin console"   "https://${PINGACCESS_HOSTNAME}:${PINGACCESS_ADMIN_PORT}")
+    _urls+=("PingDirectory admin API"    "https://${PINGDIR_HOSTNAME}:${PINGDIR_HTTPS_PORT}")
+    summary_urls "${_urls[@]}"
+
+    local -a _creds=()
+    if [[ "${INSTALL_TEST_USERS:-true}" == "true" ]]; then
+        local _users="testuser1"
+        [[ "${TEST_USER_COUNT:-5}" -gt 1 ]] && _users="testuser1..${TEST_USER_COUNT}"
+        _creds+=("End user (protected app)" "$_users" "${DEFAULT_PASSWORD:-?}")
+    fi
+    # PingFederate has no headless native-admin seed, so the console and admin
+    # API authenticate PINGFED_ADMIN_UID against PingDirectory over LDAP. It is
+    # not PINGFED_ADMIN_USER, and printing that would send people to a login
+    # that cannot succeed.
+    #
+    # Every value is :- guarded. This runs after the install has already
+    # succeeded, and errexit plus the ERR trap would turn one unset label into a
+    # cleanup_on_failure rollback of a working stack.
+    _creds+=("PingFederate admin console" "${PINGFED_ADMIN_UID:-?}"     "${PINGFED_ADMIN_PASSWORD:-?}")
+    _creds+=("PingAccess admin console"   "${PINGACCESS_ADMIN_USER:-?}" "${PINGACCESS_ADMIN_PASSWORD:-?}")
+    _creds+=("PingDirectory (LDAP root)"  "${PINGDIR_ROOT_DN:-?}"       "${PINGDIR_ROOT_PASSWORD:-?}")
+    summary_credentials "${_creds[@]}"
+
+    summary_end
     info "Installation log: $LOG_FILE"
 
     [[ "$all_healthy" == "true" ]]

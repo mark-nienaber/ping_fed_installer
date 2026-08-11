@@ -39,7 +39,7 @@ PFADMIN="https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pf-admin-api/v1"
 [[ "$LB_ON" == "1" ]] && APP_URL="$LB_APP_BASE_URL" || APP_URL="https://${SAMPLE_APP_VIRTUAL_HOST}:${PINGACCESS_ENGINE_PORT}"
 
 ALL_PANELS=(components replication cluster link lb resources)
-ALL_SOURCES=(pf pf-audit pf2 pd pd-access pd2 pd2-access pa pa-audit dash install)
+ALL_SOURCES=(pf pf-audit pf2 pd pd-access pd-unindexed pd2 pd2-access pd2-unindexed pa pa-audit dash install)
 
 _listening() { ss -ltn 2>/dev/null | grep -q ":${1} "; }
 _code() { curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || echo 000; }
@@ -236,10 +236,12 @@ _source_files() {
         pf)        echo "${PINGFED_DIR}/log/server.log" ;;
         pf-audit)  echo "${PINGFED_DIR}/log/audit.log" ;;
         pf2)       echo "${PINGFED2_DIR}/log/server.log" ;;
-        pd)         echo "${PINGDIR_DIR}/logs/errors" ;;
-        pd-access)  echo "${PINGDIR_DIR}/logs/access" ;;
-        pd2)        echo "${PINGDIR2_DIR}/logs/errors" ;;
-        pd2-access) echo "${PINGDIR2_DIR}/logs/access" ;;
+        pd)            echo "${PINGDIR_DIR}/logs/errors" ;;
+        pd-access)     echo "${PINGDIR_DIR}/logs/access" ;;
+        pd-unindexed)  echo "${PINGDIR_DIR}/logs/access" ;;
+        pd2)           echo "${PINGDIR2_DIR}/logs/errors" ;;
+        pd2-access)    echo "${PINGDIR2_DIR}/logs/access" ;;
+        pd2-unindexed) echo "${PINGDIR2_DIR}/logs/access" ;;
         pa)        echo "${PINGACCESS_DIR}/log/pingaccess.log" ;;
         pa-audit)  echo "${PINGACCESS_DIR}/log/pingaccess_engine_audit.log" ;;
         dash)      echo "${LOG_DIR}/ping-dashboard.log" ;;
@@ -260,6 +262,23 @@ _source_filter() {
     esac
 }
 
+# The inverse of _source_filter: a line must MATCH this to be shown. Used for the
+# unindexed views, where the whole point is that the interesting lines are rare —
+# a drop-filter cannot express "only the searches that went badly".
+#
+# unindexed=true is the search that had no usable index at all.
+# indexesWithKeysAccessedExceedingEntryLimit is the more interesting one: an index
+# existed and was consulted, but the key behind the value had more IDs than the
+# entry limit, so it is no longer maintained. That is the failure that looks like
+# a configuration success — see ./demo/load-bulk-users.sh.
+_source_keep() {
+    case "$1" in
+        pd-unindexed|pd2-unindexed)
+            echo 'unindexed="?true|indexesWithKeysAccessedExceedingEntryLimit|indexesWithKeysAccessedNearEntryLimit' ;;
+        *)  echo "" ;;
+    esac
+}
+
 tail_mode() {
     local -a pids=() started=() files=()
     local colours=("$_C_CYAN" "$_C_GREEN" "$_C_YELLOW" "$_C_BLUE" "$_C_WHITE")
@@ -277,7 +296,16 @@ tail_mode() {
     # Banner first: the children start emitting their backlog the moment they are
     # spawned, so anything printed after them lands in the middle of the output.
     banner "Following: ${started[*]}"
-    [[ "$RAW" == "0" ]] && info "Filtering self-chatter (topology monitor, health-check connects) — --raw to see everything"
+    # Say which kind of filtering is in play, because they are opposites: the
+    # access views drop known noise, the unindexed views keep only the bad lines
+    # and are silent the rest of the time — which looks identical to being broken.
+    local _keeping=0 _s
+    for _s in "${started[@]}"; do [[ -n "$(_source_keep "$_s")" ]] && _keeping=1; done
+    if [[ "$_keeping" == "1" ]]; then
+        info "Showing only unindexed searches and index-entry-limit hits — silence means none are happening"
+    elif [[ "$RAW" == "0" ]]; then
+        info "Filtering self-chatter (topology monitor, health-check connects) — --raw to see everything"
+    fi
     info "Ctrl-C to stop"
 
     # Cleanup has to hold the tail PIDs specifically. $! on a pipeline is the
@@ -295,14 +323,19 @@ tail_mode() {
     }
     trap _stop INT TERM EXIT
 
-    local i=0 prefix drop
+    local i=0 prefix drop keep
     for i in "${!started[@]}"; do
         src="${started[$i]}"; f="${files[$i]}"
-        prefix="${colours[$(( i % ${#colours[@]} ))]}$(printf '%-10s' "$src")${_C_RESET} "
+        prefix="${colours[$(( i % ${#colours[@]} ))]}$(printf '%-13s' "$src")${_C_RESET} "
         drop=$(_source_filter "$src")
+        keep=$(_source_keep "$src")
         # -F survives rotation. Every stage flushes per line, or matches sit in a
-        # buffer and the "live" tail arrives in bursts minutes late.
-        if [[ -n "$drop" && "$RAW" == "0" ]]; then
+        # buffer and the "live" tail arrives in bursts minutes late. A keep-filter
+        # is never disabled by --raw: without it the view is just the access log.
+        if [[ -n "$keep" ]]; then
+            tail -F -n "$TAIL_LINES" "$f" 2>/dev/null \
+                > >(grep -E --line-buffered "$keep" | awk -v p="$prefix" '{print p $0; fflush()}') &
+        elif [[ -n "$drop" && "$RAW" == "0" ]]; then
             tail -F -n "$TAIL_LINES" "$f" 2>/dev/null \
                 > >(grep -Ev --line-buffered "$drop" | awk -v p="$prefix" '{print p $0; fflush()}') &
         else
@@ -324,7 +357,11 @@ usage() {
 
   Panels:   ${ALL_PANELS[*]}
   Sources:  ${ALL_SOURCES[*]}
-            sso  = pa-audit + pf-audit + pd-access, i.e. one login across all three
+            sso        = pa-audit + pf-audit + both directory access logs —
+                         one login across every product it touches
+            unindexed  = only the searches with no usable index, or that hit a
+                         key past the index entry limit. Rare by design, so this
+                         view stays empty until something goes wrong
 
 EOF
 }
@@ -349,6 +386,9 @@ while [[ $# -gt 0 ]]; do
         # every time it lands on node 2.
         sso)     SOURCES+=(pa-audit pf-audit pd-access)
                  [[ "$CLUSTERED_PD" == "1" ]] && SOURCES+=(pd2-access) ;;
+        # Same reasoning: a bad search is just as likely to land on node 2.
+        unindexed) SOURCES+=(pd-unindexed)
+                 [[ "$CLUSTERED_PD" == "1" ]] && SOURCES+=(pd2-unindexed) ;;
         all)     [[ "$MODE" == "tail" ]] && SOURCES+=("${ALL_SOURCES[@]}") || PANELS+=("${ALL_PANELS[@]}") ;;
         *)
             if [[ " ${ALL_PANELS[*]} " == *" $1 "* ]]; then PANELS+=("$1")

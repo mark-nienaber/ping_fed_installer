@@ -39,7 +39,7 @@ PFADMIN="https://${PINGFED_HOSTNAME}:${PINGFED_ADMIN_PORT}/pf-admin-api/v1"
 [[ "$LB_ON" == "1" ]] && APP_URL="$LB_APP_BASE_URL" || APP_URL="https://${SAMPLE_APP_VIRTUAL_HOST}:${PINGACCESS_ENGINE_PORT}"
 
 ALL_PANELS=(components replication cluster link lb resources)
-ALL_SOURCES=(pf pf-audit pf2 pd pd-access pd2 pa pa-audit dash install)
+ALL_SOURCES=(pf pf-audit pf2 pd pd-access pd2 pd2-access pa pa-audit dash install)
 
 _listening() { ss -ltn 2>/dev/null | grep -q ":${1} "; }
 _code() { curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || echo 000; }
@@ -236,9 +236,10 @@ _source_files() {
         pf)        echo "${PINGFED_DIR}/log/server.log" ;;
         pf-audit)  echo "${PINGFED_DIR}/log/audit.log" ;;
         pf2)       echo "${PINGFED2_DIR}/log/server.log" ;;
-        pd)        echo "${PINGDIR_DIR}/logs/errors" ;;
-        pd-access) echo "${PINGDIR_DIR}/logs/access" ;;
-        pd2)       echo "${PINGDIR2_DIR}/logs/errors" ;;
+        pd)         echo "${PINGDIR_DIR}/logs/errors" ;;
+        pd-access)  echo "${PINGDIR_DIR}/logs/access" ;;
+        pd2)        echo "${PINGDIR2_DIR}/logs/errors" ;;
+        pd2-access) echo "${PINGDIR2_DIR}/logs/access" ;;
         pa)        echo "${PINGACCESS_DIR}/log/pingaccess.log" ;;
         pa-audit)  echo "${PINGACCESS_DIR}/log/pingaccess_engine_audit.log" ;;
         dash)      echo "${LOG_DIR}/ping-dashboard.log" ;;
@@ -254,8 +255,8 @@ _source_filter() {
     case "$1" in
         # cn=monitor is matched unanchored: the noisy probes read subtrees of it
         # (cn=Version,cn=monitor, cn=System Information,cn=monitor), not the root.
-        pd-access|pd2) echo 'CONNECT |DISCONNECT |SECURITY-NEGOTIATION|cn=monitor"|interServerComponent' ;;
-        *)             echo "" ;;
+        pd-access|pd2-access) echo 'CONNECT |DISCONNECT |SECURITY-NEGOTIATION|cn=monitor"|interServerComponent' ;;
+        *)                    echo "" ;;
     esac
 }
 
@@ -343,7 +344,11 @@ while [[ $# -gt 0 ]]; do
         --list)  usage; exit 0 ;;
         -n)      shift; TAIL_LINES="${1:-20}" ;;
         -h|--help) usage; exit 0 ;;
-        sso)     SOURCES+=(pa-audit pf-audit pd-access) ;;
+        # Both directory access logs when replicated: PingFederate's data store
+        # picks a replica per connection, so following only node 1 loses the bind
+        # every time it lands on node 2.
+        sso)     SOURCES+=(pa-audit pf-audit pd-access)
+                 [[ "$CLUSTERED_PD" == "1" ]] && SOURCES+=(pd2-access) ;;
         all)     [[ "$MODE" == "tail" ]] && SOURCES+=("${ALL_SOURCES[@]}") || PANELS+=("${ALL_PANELS[@]}") ;;
         *)
             if [[ " ${ALL_PANELS[*]} " == *" $1 "* ]]; then PANELS+=("$1")
